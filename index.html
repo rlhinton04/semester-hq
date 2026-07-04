@@ -3,13 +3,269 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Semester HQ</title>
-  <style>
-    body { font-family: system-ui, sans-serif; display: grid; place-items: center; min-height: 100vh; margin: 0; background: #101418; color: #f0f3f6; }
-    p { font-size: 1.1rem; letter-spacing: 0.02em; }
-  </style>
+  <title>Semester HQ — your semester, at a glance</title>
+  <meta name="description" content="A calm dashboard for your semester: courses, assignments, and exams with a clear view of what's due this week. Free, private, no account — your data stays in your browser.">
+  <meta property="og:title" content="Semester HQ">
+  <meta property="og:description" content="Your semester, at a glance. Courses, assignments, and what's due this week — no account needed.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://rlhinton04.github.io/semester-hq/">
+  <meta property="og:image" content="https://rlhinton04.github.io/semester-hq/og.png">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2317604a'/%3E%3Cpath d='M18 34l10 10 18-24' stroke='%23faf9f6' stroke-width='7' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+
+  <!-- Apply saved/OS theme before paint to avoid a flash -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('semesterhq:theme');
+        if (t === 'dark' || (!t && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        }
+      } catch (e) {}
+    })();
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="app.css?v=1">
 </head>
+
 <body>
-  <p>Semester HQ — launching soon.</p>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="app-header">
+    <div class="shell header-row">
+      <a class="brand" href="#week" aria-label="Semester HQ home">
+        <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+          <rect width="64" height="64" rx="14"></rect>
+          <path d="M18 34l10 10 18-24" fill="none" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"></path>
+        </svg>
+        <span>Semester&nbsp;HQ</span>
+      </a>
+
+      <nav class="main-nav" aria-label="Views">
+        <a class="nav-link" href="#week" data-view="week">This Week</a>
+        <a class="nav-link" href="#upcoming" data-view="upcoming">Upcoming</a>
+        <a class="nav-link" href="#courses" data-view="courses">Courses</a>
+      </nav>
+
+      <button class="theme-toggle" type="button" id="theme-toggle" aria-label="Switch to dark mode">
+        <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5 5l2.1 2.1M16.9 16.9L19 19M19 5l-2.1 2.1M7.1 16.9L5 19" stroke-linecap="round"></path></svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z"></path></svg>
+      </button>
+    </div>
+  </header>
+
+  <main id="main" class="shell">
+    <section class="view" id="view-week" aria-labelledby="week-title">
+      <h1 class="visually-hidden" id="week-title">This week</h1>
+      <div id="week-content"></div>
+    </section>
+
+    <section class="view" id="view-upcoming" aria-labelledby="upcoming-title" hidden>
+      <div class="view-header">
+        <h1 id="upcoming-title">Upcoming</h1>
+        <button class="btn btn-primary" type="button" data-action="add-assignment">
+          <span aria-hidden="true">+</span> Add assignment
+        </button>
+      </div>
+      <div class="filters" id="upcoming-filters" hidden>
+        <label class="field-inline">
+          <span>Course</span>
+          <select id="filter-course"><option value="">All courses</option></select>
+        </label>
+        <label class="field-inline">
+          <span>Type</span>
+          <select id="filter-type">
+            <option value="">All types</option>
+            <option value="assignment">Assignment</option>
+            <option value="quiz">Quiz</option>
+            <option value="exam">Exam</option>
+            <option value="project">Project</option>
+            <option value="reading">Reading</option>
+          </select>
+        </label>
+        <label class="field-inline field-check">
+          <input type="checkbox" id="filter-done">
+          <span>Show completed</span>
+        </label>
+      </div>
+      <div id="upcoming-content"></div>
+    </section>
+
+    <section class="view" id="view-courses" aria-labelledby="courses-title" hidden>
+      <div class="view-header">
+        <h1 id="courses-title">Courses</h1>
+        <button class="btn btn-primary" type="button" data-action="add-course">
+          <span aria-hidden="true">+</span> Add course
+        </button>
+      </div>
+      <div id="courses-content"></div>
+    </section>
+
+    <section class="view view-about" id="view-about" aria-labelledby="about-title" hidden>
+      <h1 id="about-title">How I built this</h1>
+      <p class="about-lede">
+        Semester HQ is a portfolio project by <a href="https://reganhinton.com" rel="author">Regan Hinton</a> —
+        a small, real product built to show how I work: design decisions first, then an AI-accelerated build.
+      </p>
+
+      <h2>Design first</h2>
+      <p>
+        Before writing any code, I decided what this product should be: not another full planner, but a calm answer
+        to one question — <em>what does my week actually look like?</em> That decision shaped everything else:
+        a dashboard as the front door, a guided first run instead of a manual, and empty states that tell you
+        what to do next. The visual identity was designed as a token system — warm paper surfaces, an evergreen
+        accent, Space Grotesk and Inter — with every text-and-background pair checked against WCAG AA and the six
+        course colors validated for color-blind separation before a single component was styled.
+      </p>
+
+      <h2>Built with Claude Code</h2>
+      <p>
+        I built the app in partnership with Claude Code, working from a written plan. The AI accelerated the parts
+        that are slow by hand — scaffolding, the calendar math and its edge-case tests, and automated accessibility
+        audits on every view in both themes. The product decisions stayed human: what to build, what to leave out,
+        how the interface should feel, and when "done" was actually done. The result is plain HTML, CSS, and
+        JavaScript — no framework, no build step, and the whole thing ships as three files.
+      </p>
+
+      <h2>Honest limits</h2>
+      <p>
+        Your data lives in this browser's local storage and never leaves your device — which also means it doesn't
+        sync between devices. The Export button in the footer downloads a backup you can import anywhere.
+      </p>
+
+      <p class="about-signoff">
+        — Regan Hinton · <a href="https://reganhinton.com">reganhinton.com</a> ·
+        <a href="https://github.com/rlhinton04/semester-hq">source on GitHub</a>
+      </p>
+    </section>
+  </main>
+
+  <footer class="app-footer">
+    <div class="shell footer-row">
+      <p class="footer-note">Your data stays in this browser — nothing is uploaded.</p>
+      <div class="footer-actions">
+        <button class="btn btn-ghost btn-sm" type="button" id="btn-export">Export backup</button>
+        <button class="btn btn-ghost btn-sm" type="button" id="btn-import">Import</button>
+        <button class="btn btn-ghost btn-sm" type="button" id="btn-clear">Clear all data</button>
+        <input type="file" id="file-import" accept="application/json,.json" hidden>
+      </div>
+      <p class="footer-credit">
+        <a href="#about" data-view="about">How I built this</a> ·
+        Designed by <a href="https://reganhinton.com">Regan Hinton</a>
+      </p>
+    </div>
+  </footer>
+
+  <!-- Semester dialog -->
+  <dialog class="dialog" id="dlg-semester" aria-labelledby="dlg-semester-title">
+    <form id="form-semester" novalidate>
+      <h2 id="dlg-semester-title">Set up your semester</h2>
+      <p class="dialog-hint">Dates give you the "Week 3 of 16" view — check your school's academic calendar.</p>
+      <div class="field">
+        <label for="semester-name">Semester name</label>
+        <input type="text" id="semester-name" required maxlength="40" placeholder="e.g. Fall 2026" autocomplete="off">
+        <p class="field-error" id="semester-name-error" hidden></p>
+      </div>
+      <div class="field-pair">
+        <div class="field">
+          <label for="semester-start">First day</label>
+          <input type="date" id="semester-start" required>
+        </div>
+        <div class="field">
+          <label for="semester-end">Last day</label>
+          <input type="date" id="semester-end" required>
+        </div>
+      </div>
+      <p class="field-error" id="semester-dates-error" hidden></p>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" type="button" data-action="close-dialog">Cancel</button>
+        <button class="btn btn-primary" type="submit" id="semester-submit">Save semester</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Course dialog -->
+  <dialog class="dialog" id="dlg-course" aria-labelledby="dlg-course-title">
+    <form id="form-course" novalidate>
+      <h2 id="dlg-course-title">Add a course</h2>
+      <div class="field-pair">
+        <div class="field">
+          <label for="course-code">Code</label>
+          <input type="text" id="course-code" required maxlength="12" placeholder="INFO-I 300" autocomplete="off">
+          <p class="field-error" id="course-code-error" hidden></p>
+        </div>
+        <div class="field field-grow">
+          <label for="course-name">Name</label>
+          <input type="text" id="course-name" required maxlength="60" placeholder="Human-Computer Interaction" autocomplete="off">
+          <p class="field-error" id="course-name-error" hidden></p>
+        </div>
+      </div>
+      <fieldset class="field">
+        <legend>Color</legend>
+        <div class="swatches" id="course-swatches"></div>
+      </fieldset>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" type="button" data-action="close-dialog">Cancel</button>
+        <button class="btn btn-primary" type="submit" id="course-submit">Save course</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Assignment dialog -->
+  <dialog class="dialog" id="dlg-assignment" aria-labelledby="dlg-assignment-title">
+    <form id="form-assignment" novalidate>
+      <h2 id="dlg-assignment-title">Add an assignment</h2>
+      <div class="field">
+        <label for="assignment-title">What's due?</label>
+        <input type="text" id="assignment-title" required maxlength="80" placeholder="e.g. Wireframes for project 2" autocomplete="off">
+        <p class="field-error" id="assignment-title-error" hidden></p>
+      </div>
+      <div class="field-pair">
+        <div class="field field-grow">
+          <label for="assignment-course">Course</label>
+          <select id="assignment-course" required></select>
+        </div>
+        <div class="field">
+          <label for="assignment-type">Type</label>
+          <select id="assignment-type">
+            <option value="assignment">Assignment</option>
+            <option value="quiz">Quiz</option>
+            <option value="exam">Exam</option>
+            <option value="project">Project</option>
+            <option value="reading">Reading</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label for="assignment-due">Due date</label>
+        <input type="date" id="assignment-due" required>
+        <p class="field-error" id="assignment-due-error" hidden></p>
+      </div>
+      <div class="field">
+        <label for="assignment-notes">Notes <span class="label-soft">(optional)</span></label>
+        <textarea id="assignment-notes" rows="2" maxlength="280" placeholder="Anything to remember — page count, rubric, group members…"></textarea>
+      </div>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" type="button" data-action="close-dialog">Cancel</button>
+        <button class="btn btn-primary" type="submit" id="assignment-submit">Save assignment</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Confirm dialog -->
+  <dialog class="dialog dialog-sm" id="dlg-confirm" aria-labelledby="dlg-confirm-title">
+    <h2 id="dlg-confirm-title">Are you sure?</h2>
+    <p id="dlg-confirm-message"></p>
+    <div class="dialog-actions">
+      <button class="btn btn-ghost" type="button" data-action="close-dialog">Cancel</button>
+      <button class="btn btn-danger" type="button" id="confirm-accept">Delete</button>
+    </div>
+  </dialog>
+
+  <div class="visually-hidden" role="status" aria-live="polite" id="live"></div>
+
+  <script src="app.js?v=1"></script>
 </body>
 </html>
