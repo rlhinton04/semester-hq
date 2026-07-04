@@ -71,24 +71,77 @@
   // ============================================================
   const KEY = 'semesterhq:v1';
   const THEME_KEY = 'semesterhq:theme';
-  const EMPTY = { semester: null, courses: [], assignments: [], sample: false };
+  const EMPTY = {
+    semester: null, courses: [], assignments: [], sample: false,
+    meta: { lastBackupAt: null, changesSinceBackup: 0, nudgeSnoozedUntil: null }
+  };
+
+  const ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const HHMM_RE = /^\d{2}:\d{2}$/;
+
+  // Defaults + sanitizes any stored/imported state into the current shape.
+  // Older data (pre-schedule/subtasks/meta) passes through and gains defaults,
+  // so this doubles as the schema migration.
+  function normalizeState(raw) {
+    const d = raw && typeof raw === 'object' ? raw : {};
+    const meta = d.meta && typeof d.meta === 'object' ? d.meta : {};
+    const out = {
+      semester: d.semester || null,
+      courses: Array.isArray(d.courses) ? d.courses : [],
+      assignments: Array.isArray(d.assignments) ? d.assignments : [],
+      sample: !!d.sample,
+      meta: {
+        lastBackupAt: typeof meta.lastBackupAt === 'string' ? meta.lastBackupAt : null,
+        changesSinceBackup: Number.isInteger(meta.changesSinceBackup) && meta.changesSinceBackup >= 0
+          ? meta.changesSinceBackup : 0,
+        nudgeSnoozedUntil: ISO_RE.test(meta.nudgeSnoozedUntil || '') ? meta.nudgeSnoozedUntil : null
+      }
+    };
+    out.courses.forEach((c) => {
+      const sched = Array.isArray(c.schedule) ? c.schedule : [];
+      c.schedule = sched
+        .filter((m) => m && typeof m === 'object')
+        .map((m) => ({
+          id: typeof m.id === 'string' ? m.id : uid(),
+          days: Array.isArray(m.days)
+            ? Array.from(new Set(m.days.filter((n) => Number.isInteger(n) && n >= 0 && n <= 6)))
+            : [],
+          start: HHMM_RE.test(m.start || '') ? m.start : '',
+          end: HHMM_RE.test(m.end || '') ? m.end : '',
+          location: typeof m.location === 'string' ? m.location.slice(0, 60) : ''
+        }))
+        .filter((m) => m.days.length > 0 && m.start);
+      c.schedule.forEach((m) => { if (m.end && m.end <= m.start) m.end = ''; });
+    });
+    out.assignments.forEach((a) => {
+      const subs = Array.isArray(a.subtasks) ? a.subtasks : [];
+      a.subtasks = subs
+        .filter((s) => s && typeof s === 'object' && typeof s.title === 'string' && s.title.trim())
+        .map((s) => ({
+          id: typeof s.id === 'string' ? s.id : uid(),
+          title: s.title.slice(0, 80),
+          dueDate: ISO_RE.test(s.dueDate || '') ? s.dueDate : null,
+          done: !!s.done
+        }));
+      if (typeof a.canvasUid !== 'string' || !a.canvasUid) delete a.canvasUid;
+      else a.canvasUid = a.canvasUid.slice(0, 120);
+    });
+    return out;
+  }
 
   function load() {
     try {
       const raw = localStorage.getItem(KEY);
       if (!raw) return structuredClone(EMPTY);
-      const data = JSON.parse(raw);
-      return {
-        semester: data.semester || null,
-        courses: Array.isArray(data.courses) ? data.courses : [],
-        assignments: Array.isArray(data.assignments) ? data.assignments : [],
-        sample: !!data.sample
-      };
+      return normalizeState(JSON.parse(raw));
     } catch (e) {
       return structuredClone(EMPTY);
     }
   }
-  function save() { localStorage.setItem(KEY, JSON.stringify(state)); }
+  function save(opts) {
+    if (!opts || !opts.silent) state.meta.changesSinceBackup += 1;
+    localStorage.setItem(KEY, JSON.stringify(state));
+  }
 
   let state = load();
 
@@ -139,16 +192,103 @@
 
   function chipHtml(course) {
     if (!course) return '';
-    return '<span class="course-chip"><span class="dot" style="--dot-color: var(--c-' + course.color + ')"></span>' + esc(course.code) + '</span>';
+    return '<span class="course-chip" style="color: var(--c-' + course.color + ')">' + esc(course.code) + '</span>';
+  }
+
+  // Assignment ids whose step lists are expanded (survives re-render)
+  const expandedSubtasks = new Set();
+
+  // Flattens assignments plus the dated subtasks of open assignments, so
+  // Week and Upcoming can place steps on their own due dates. A done
+  // parent hides its remaining steps — completing the assignment
+  // completes the plan.
+  function dueEntries(assignments) {
+    const entries = [];
+    assignments.forEach((a) => {
+      entries.push({ kind: 'assignment', dueDate: a.dueDate, a });
+      if (a.status !== 'done') {
+        a.subtasks.forEach((s) => {
+          if (s.dueDate) entries.push({ kind: 'subtask', dueDate: s.dueDate, a, s });
+        });
+      }
+    });
+    return entries;
+  }
+
+  function subtaskRowStandalone(e, opts) {
+    const a = e.a, s = e.s;
+    const course = courseById(a.courseId);
+    const spine = course ? ' style="--row-spine: var(--c-' + course.color + ')"' : '';
+    const today = todayISO();
+    const overdue = !s.done && s.dueDate < today;
+    const showDate = opts && opts.showDate;
+    let note = '';
+    if (showDate) {
+      note = '<span class="due-note' + (overdue ? ' overdue-note' : '') + '">' +
+        (overdue ? 'was due ' : 'due ') + fLong(s.dueDate) + '</span>';
+    } else if (overdue) {
+      const late = daysBetween(s.dueDate, today);
+      note = '<span class="due-note overdue-note">' + late + ' day' + (late === 1 ? '' : 's') + ' late</span>';
+    }
+    return (
+      '<li class="item-row subtask-row' + (s.done ? ' done-item' : '') + '" data-id="' + a.id + '"' + spine + '>' +
+        '<input type="checkbox" class="item-check subtask-check" data-sub-id="' + s.id + '" ' + (s.done ? 'checked ' : '') +
+          'aria-label="Mark step &quot;' + esc(s.title) + '&quot; ' + (s.done ? 'not done' : 'done') + '">' +
+        '<div class="item-main">' +
+          '<div class="item-title"><span class="subtask-arrow" aria-hidden="true">↳</span> ' + esc(s.title) + '</div>' +
+          '<div class="item-meta">' +
+            chipHtml(course) +
+            '<span class="type-tag">step of “' + esc(a.title) + '”</span>' +
+            note +
+          '</div>' +
+        '</div>' +
+      '</li>'
+    );
+  }
+
+  function entryRowHtml(e, opts) {
+    return e.kind === 'assignment' ? itemRowHtml(e.a, opts) : subtaskRowStandalone(e, opts);
   }
 
   function itemRowHtml(a, opts) {
     const course = courseById(a.courseId);
     const done = a.status === 'done';
-    const overdue = !done && a.dueDate < todayISO();
+    const today = todayISO();
+    const overdue = !done && a.dueDate < today;
     const showDate = opts && opts.showDate;
+    const spine = course ? ' style="--row-spine: var(--c-' + course.color + ')"' : '';
+    let dueNote = '';
+    if (showDate) {
+      dueNote = '<span class="due-note' + (overdue ? ' overdue-note' : '') + '">' +
+        (overdue ? 'was due ' : 'due ') + fLong(a.dueDate) + '</span>';
+    } else if (overdue) {
+      const late = daysBetween(a.dueDate, today);
+      dueNote = '<span class="due-note overdue-note">' + late + ' day' + (late === 1 ? '' : 's') + ' late</span>';
+    }
+    const subs = a.subtasks || [];
+    let stepsChip = '', stepsList = '';
+    if (subs.length) {
+      const doneN = subs.filter((s) => s.done).length;
+      const expanded = expandedSubtasks.has(a.id);
+      stepsChip =
+        '<button class="steps-chip" type="button" data-action="toggle-subtasks" aria-expanded="' + expanded + '" ' +
+          'aria-label="' + (expanded ? 'Hide' : 'Show') + ' steps for &quot;' + esc(a.title) + '&quot;">' +
+          doneN + '/' + subs.length + ' steps <span class="chev" aria-hidden="true">' + (expanded ? '▴' : '▾') + '</span>' +
+        '</button>';
+      if (expanded) {
+        stepsList =
+          '<ul class="subtask-list">' + subs.map((s) =>
+            '<li class="subtask-item' + (s.done ? ' done-sub' : '') + '">' +
+              '<input type="checkbox" class="item-check subtask-check" data-sub-id="' + s.id + '" ' + (s.done ? 'checked ' : '') +
+                'aria-label="Mark step &quot;' + esc(s.title) + '&quot; ' + (s.done ? 'not done' : 'done') + '">' +
+              '<span class="subtask-text">' + esc(s.title) + '</span>' +
+              (s.dueDate ? '<span class="subtask-due-chip">' + fMonthDay(s.dueDate) + '</span>' : '') +
+            '</li>'
+          ).join('') + '</ul>';
+      }
+    }
     return (
-      '<li class="item-row' + (done ? ' done-item' : '') + '" data-id="' + a.id + '">' +
+      '<li class="item-row' + (done ? ' done-item' : '') + '" data-id="' + a.id + '"' + spine + '>' +
         '<input type="checkbox" class="item-check" ' + (done ? 'checked ' : '') +
           'aria-label="Mark &quot;' + esc(a.title) + '&quot; ' + (done ? 'not done' : 'done') + '">' +
         '<div class="item-main">' +
@@ -156,10 +296,8 @@
           '<div class="item-meta">' +
             chipHtml(course) +
             '<span class="type-tag type-' + a.type + '">' + TYPES[a.type] + '</span>' +
-            (showDate
-              ? '<span class="due-note' + (overdue ? ' overdue-note' : '') + '">' +
-                  (overdue ? 'was due ' : 'due ') + fLong(a.dueDate) + '</span>'
-              : (overdue ? '<span class="due-note overdue-note">was due ' + fLong(a.dueDate) + '</span>' : '')) +
+            dueNote +
+            stepsChip +
             (a.notes ? '<span class="item-notes">' + esc(a.notes) + '</span>' : '') +
           '</div>' +
         '</div>' +
@@ -171,6 +309,7 @@
             '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M10 11v6M14 11v6M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12M9 7V5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5v2"/></svg>' +
           '</button>' +
         '</div>' +
+        stepsList +
       '</li>'
     );
   }
@@ -203,15 +342,25 @@
     const notStarted = today < sem.startDate;
     const ended = today > sem.endDate;
 
-    let heroSub;
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const weekNum = notStarted ? 0 : week;
+    const ahead = state.assignments.filter((a) => a.status !== 'done' && a.dueDate >= today).length;
+
+    let eyebrow;
     if (notStarted) {
-      heroSub = 'Starts ' + fFull(sem.startDate) + ' — ' + daysBetween(today, sem.startDate) + ' days away';
+      eyebrow = esc(sem.name) + ' · Starts ' + fMonthDay(sem.startDate);
     } else if (ended) {
-      heroSub = 'Ended ' + fFull(sem.endDate) + ' — that’s a wrap 🎉';
+      eyebrow = esc(sem.name) + ' · Complete 🎉';
     } else {
-      heroSub = 'Week ' + week + ' of ' + totalW;
+      eyebrow = esc(sem.name) + (ahead > 0 ? ' · ' + ahead + ' item' + (ahead === 1 ? '' : 's') + ' ahead' : '');
     }
-    const pct = notStarted ? 0 : ended ? 100 : Math.round(((week - 0.5) / totalW) * 100);
+
+    let ticks = '';
+    for (let i = 1; i <= totalW; i++) {
+      const cls = (ended || (!notStarted && i < week)) ? ' past'
+        : (!notStarted && !ended && i === week) ? ' current' : '';
+      ticks += '<span class="tick' + cls + '"></span>';
+    }
 
     let html = '';
     if (state.sample) {
@@ -220,19 +369,37 @@
         '<button class="btn btn-ghost btn-sm" type="button" data-action="clear-sample">Clear sample &amp; start fresh</button></div>';
     }
 
+    const meta = state.meta;
+    const backupDue = !state.sample && meta.changesSinceBackup > 0 &&
+      (!meta.nudgeSnoozedUntil || today > meta.nudgeSnoozedUntil) &&
+      (meta.lastBackupAt === null
+        ? meta.changesSinceBackup >= 15
+        : daysBetween(meta.lastBackupAt.slice(0, 10), today) >= 7);
+    if (backupDue) {
+      const msg = meta.lastBackupAt === null
+        ? 'You’ve added ' + meta.changesSinceBackup + ' changes and never downloaded a backup.'
+        : 'It’s been ' + daysBetween(meta.lastBackupAt.slice(0, 10), today) + ' days since your last backup.';
+      html +=
+        '<div class="backup-banner"><span><strong>Back up your data.</strong> ' + msg + '</span>' +
+        '<span class="banner-actions">' +
+          '<button class="btn btn-ghost btn-sm" type="button" data-action="export-backup">Back up now</button>' +
+          '<button class="btn btn-ghost btn-sm" type="button" data-action="dismiss-backup-nudge">Later</button>' +
+        '</span></div>';
+    }
+
     html +=
-      '<div class="week-hero">' +
-        '<div class="week-hero-name"><h2>' + esc(sem.name) + '</h2>' +
-          '<button class="btn-icon" type="button" data-action="edit-semester" aria-label="Edit semester name and dates">' +
-            '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19.5 8.5a2.1 2.1 0 0 0-3-3L5 17Z"/><path d="m14.5 7.5 3 3"/></svg>' +
-          '</button></div>' +
-        '<span class="week-sub">' + heroSub + '</span>' +
-      '</div>' +
-      '<div class="semester-progress">' +
-        '<div class="track" role="img" aria-label="Semester progress: ' + pct + ' percent">' +
-          '<div class="fill" style="width:' + pct + '%"></div>' +
+      '<div class="hero-band">' +
+        '<div class="hero-left">' +
+          '<div class="hero-eyebrow"><span>' + eyebrow + '</span>' +
+            '<button class="btn-icon" type="button" data-action="edit-semester" aria-label="Edit semester name and dates">' +
+              '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19.5 8.5a2.1 2.1 0 0 0-3-3L5 17Z"/><path d="m14.5 7.5 3 3"/></svg>' +
+            '</button></div>' +
+          '<div class="hero-week">Week ' + pad2(weekNum) + ' <span class="hero-total">/ ' + totalW + '</span></div>' +
         '</div>' +
-        '<div class="caption"><span>' + fMonthDay(sem.startDate) + '</span><span>' + fMonthDay(sem.endDate) + '</span></div>' +
+        '<div class="spine-wrap">' +
+          '<div class="spine" role="img" aria-label="Semester progress: week ' + weekNum + ' of ' + totalW + '">' + ticks + '</div>' +
+          '<div class="spine-caption">' + fMonthDay(sem.startDate) + ' —— ' + fMonthDay(sem.endDate) + '</div>' +
+        '</div>' +
       '</div>';
 
     if (state.courses.length === 0) {
@@ -246,20 +413,42 @@
       return;
     }
 
+    if (!notStarted && !ended) {
+      const meetings = SHQ.meetingsToday(state.courses, parseDate(today).getDay());
+      if (meetings.length) {
+        html +=
+          '<div class="today-classes">' +
+            '<span class="today-classes-label">Today’s classes</span>' +
+            meetings.map(({ course, meeting }) =>
+              '<span class="class-chip" style="--row-spine: var(--c-' + course.color + ')">' +
+                '<span class="class-chip-code" style="color: var(--c-' + course.color + ')">' + esc(course.code) + '</span>' +
+                '<span class="class-chip-time">' + SHQ.formatMeetingTime(meeting) +
+                  (meeting.location ? ' · ' + esc(meeting.location) : '') + '</span>' +
+              '</span>'
+            ).join('') +
+          '</div>';
+      }
+    }
+
+    // Assignments plus dated steps, each on its own due date
+    const entries = dueEntries(state.assignments);
+    const entryDone = (e) => e.kind === 'assignment' ? e.a.status === 'done' : e.s.done;
+
     // Overdue: anything unfinished with a due date before today
-    const overdue = state.assignments
-      .filter((a) => a.status !== 'done' && a.dueDate < today)
-      .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+    const overdue = entries
+      .filter((e) => !entryDone(e) && e.dueDate < today)
+      .sort((x, y) => x.dueDate.localeCompare(y.dueDate));
 
     // This calendar week's items, grouped by day (todo from today on, plus anything done this week)
     const sunday = addDays(monday, 6);
     const thisWeek = state.assignments.filter((a) => a.dueDate >= monday && a.dueDate <= sunday);
+    const weekEntries = entries.filter((e) => e.dueDate >= monday && e.dueDate <= sunday);
     const dayGroups = [];
     for (let i = 0; i < 7; i++) {
       const dayISO = addDays(monday, i);
-      const items = thisWeek
-        .filter((a) => a.dueDate === dayISO && (a.status === 'done' || a.dueDate >= today))
-        .sort((a, b) => (a.status === 'done') - (b.status === 'done'));
+      const items = weekEntries
+        .filter((e) => e.dueDate === dayISO && (entryDone(e) || e.dueDate >= today))
+        .sort((x, y) => entryDone(x) - entryDone(y));
       if (items.length) dayGroups.push({ dayISO, items });
     }
 
@@ -267,17 +456,20 @@
     if (overdue.length) {
       listHtml +=
         '<div class="day-group">' +
-          '<h3 class="day-head overdue-head">Overdue · ' + overdue.length + '</h3>' +
-          '<ul class="item-list">' + overdue.map((a) => itemRowHtml(a)).join('') + '</ul>' +
+          '<h3 class="day-head overdue-head"><span class="overdue-label">Overdue</span>' +
+            '<span class="day-rule"></span><span class="overdue-count">' + pad2(overdue.length) + '</span></h3>' +
+          '<ul class="item-list">' + overdue.map((e) => entryRowHtml(e)).join('') + '</ul>' +
         '</div>';
     }
     dayGroups.forEach((g) => {
       const isToday = g.dayISO === today;
       listHtml +=
         '<div class="day-group">' +
-          '<h3 class="day-head">' + fmtDayName.format(parseDate(g.dayISO)) + ' ' + fMonthDay(g.dayISO) +
-            (isToday ? ' <span class="today-tag">Today</span>' : '') + '</h3>' +
-          '<ul class="item-list">' + g.items.map((a) => itemRowHtml(a)).join('') + '</ul>' +
+          '<h3 class="day-head"><span class="day-name">' + fmtDayName.format(parseDate(g.dayISO)) + '</span>' +
+            '<span class="day-date">' + fMonthDay(g.dayISO) + '</span>' +
+            (isToday ? '<span class="today-tag">Today</span>' : '') +
+            '<span class="day-rule"></span></h3>' +
+          '<ul class="item-list">' + g.items.map((e) => entryRowHtml(e)).join('') + '</ul>' +
         '</div>';
     });
     if (!overdue.length && !dayGroups.length) {
@@ -289,10 +481,10 @@
         '</div>';
     } else {
       listHtml +=
-        '<p><button class="btn btn-ghost btn-sm" type="button" data-action="add-assignment">+ Add an assignment</button></p>';
+        '<p><button class="btn-add-dashed" type="button" data-action="add-assignment">+ Add assignment</button></p>';
     }
 
-    // Workload chart: due items per day this week (single series, direct hover labels)
+    // Load rail: due items per day this week, one horizontal bar per day
     const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     const counts = dayNames.map((_, i) => {
       const dayISO = addDays(monday, i);
@@ -303,26 +495,39 @@
     const chartSummary = total === 0
       ? 'No items due this week.'
       : dayNames.map((n, i) => counts[i] ? counts[i] + ' due ' + n : null).filter(Boolean).join(', ') + '.';
-    const bars = dayNames.map((name, i) => {
-      const dayISO = addDays(monday, i);
-      const h = counts[i] === 0 ? 3 : Math.round((counts[i] / max) * 78) + 8;
+    const railRows = dayNames.map((name, i) => {
+      const isT = addDays(monday, i) === today;
+      const zero = counts[i] === 0;
+      const w = zero ? 0 : Math.round((counts[i] / max) * 100);
       return (
-        '<div class="bar-col' + (dayISO === today ? ' is-today' : '') + '" title="' + counts[i] + ' due ' + name + '">' +
-          '<span class="bar-value">' + (counts[i] || '') + '</span>' +
-          '<div class="bar' + (counts[i] === 0 ? ' bar-zero' : '') + '" style="height:' + h + 'px"></div>' +
-          '<span class="bar-label">' + name + '</span>' +
+        '<div class="rail-row' + (isT ? ' is-today' : '') + '">' +
+          '<span class="rail-day">' + name + '</span>' +
+          '<span class="rail-barwrap">' +
+            (zero ? '<span class="rail-bar rail-bar-zero"></span>'
+                  : '<span class="rail-bar" style="width:' + w + '%"></span>') +
+          '</span>' +
+          '<span class="rail-count' + (zero ? ' is-zero' : '') + '">' + (zero ? '—' : counts[i]) + '</span>' +
         '</div>'
       );
     }).join('');
+    let railFoot = '';
+    if (total > 0) {
+      const peak = Math.max(...counts);
+      const heaviest = dayNames.filter((_, i) => counts[i] === peak).join(', ');
+      const clear = dayNames.filter((_, i) => counts[i] === 0).join(', ');
+      railFoot = '<div class="rail-foot">Heaviest: ' + heaviest + (clear ? ' / Clear: ' + clear : '') + '</div>';
+    }
+    const railSub = total + ' due' + (overdue.length ? ' · ' + overdue.length + ' overdue' : '');
 
     html +=
-      '<div class="week-grid">' +
+      '<div class="week-body">' +
         '<div class="week-list">' + listHtml + '</div>' +
-        '<div class="card chart-card">' +
-          '<h2>This week’s load</h2>' +
-          '<p class="chart-caption">' + (total === 0 ? 'Nothing due — clear runway.' : total + ' item' + (total === 1 ? '' : 's') + ' due this week') + '</p>' +
-          '<div class="workload" role="img" aria-label="Due items by day. ' + esc(chartSummary) + '">' + bars + '</div>' +
-        '</div>' +
+        '<aside class="load-rail">' +
+          '<h2 class="rail-title">This week’s<br>load</h2>' +
+          '<p class="rail-sub">' + railSub + '</p>' +
+          '<div class="rail-rows" role="img" aria-label="Due items by day. ' + esc(chartSummary) + '">' + railRows + '</div>' +
+          railFoot +
+        '</aside>' +
       '</div>';
 
     el.innerHTML = html;
@@ -385,22 +590,36 @@
       return;
     }
 
+    // Assignments plus dated steps of open assignments
+    const entries = [];
+    items.forEach((a) => {
+      entries.push({ kind: 'assignment', dueDate: a.dueDate, a });
+      if (a.status !== 'done') {
+        a.subtasks.forEach((s) => {
+          if (s.dueDate && (showDone || !s.done)) entries.push({ kind: 'subtask', dueDate: s.dueDate, a, s });
+        });
+      }
+    });
+    entries.sort((x, y) => x.dueDate.localeCompare(y.dueDate) ||
+      (x.kind === 'subtask' ? x.s.title : x.a.title).localeCompare(y.kind === 'subtask' ? y.s.title : y.a.title));
+
     const today = todayISO();
     const thisMon = startOfWeek(today);
-    const groups = new Map(); // label -> items
-    items.forEach((a) => {
+    const groups = new Map(); // label -> entries
+    entries.forEach((e) => {
+      const done = e.kind === 'assignment' ? e.a.status === 'done' : e.s.done;
       let label;
-      if (a.status !== 'done' && a.dueDate < today) {
+      if (!done && e.dueDate < today) {
         label = 'Overdue';
       } else {
-        const diff = Math.round(daysBetween(thisMon, startOfWeek(a.dueDate)) / 7);
+        const diff = Math.round(daysBetween(thisMon, startOfWeek(e.dueDate)) / 7);
         if (diff < 0) label = 'Earlier';
         else if (diff === 0) label = 'This week';
         else if (diff === 1) label = 'Next week';
-        else label = 'Week of ' + fMonthDay(startOfWeek(a.dueDate));
+        else label = 'Week of ' + fMonthDay(startOfWeek(e.dueDate));
       }
       if (!groups.has(label)) groups.set(label, []);
-      groups.get(label).push(a);
+      groups.get(label).push(e);
     });
 
     // Overdue first, Earlier last-but-orderly, rest in due order (map preserves insertion of sorted items, but Overdue may appear late)
@@ -411,7 +630,7 @@
 
     el.innerHTML = ordered.map(([label, arr]) =>
       '<h2 class="week-section-head' + (label === 'Overdue' ? ' overdue-head' : '') + '">' + label + ' · ' + arr.length + '</h2>' +
-      '<ul class="item-list">' + arr.map((a) => itemRowHtml(a, { showDate: true })).join('') + '</ul>'
+      '<ul class="item-list">' + arr.map((e) => entryRowHtml(e, { showDate: true })).join('') + '</ul>'
     ).join('');
   }
 
@@ -442,6 +661,12 @@
             '<div class="course-top"><span class="dot" style="--dot-color: var(--c-' + c.color + ')"></span>' +
               '<span class="course-code">' + esc(c.code) + '</span></div>' +
             '<div class="course-name">' + esc(c.name) + '</div>' +
+            (c.schedule.length
+              ? '<div class="course-schedule">' + c.schedule.map((m) =>
+                  SHQ.formatMeetingDays(m.days) + ' · ' + SHQ.formatMeetingTime(m) +
+                  (m.location ? ' · ' + esc(m.location) : '')
+                ).join('<br>') + '</div>'
+              : '') +
             '<div class="course-count">' + (n === 0 ? 'All caught up' : n + ' open item' + (n === 1 ? '' : 's')) + '</div>' +
             '<div class="item-actions">' +
               '<button class="btn-icon" type="button" data-action="edit-course" aria-label="Edit ' + esc(c.code) + '">' +
@@ -550,6 +775,48 @@
     });
     return best;
   }
+  // Mon-first day toggles; values are Date.getDay() ints
+  const MEETING_DAYS = [[1, 'M'], [2, 'Tu'], [3, 'W'], [4, 'Th'], [5, 'F'], [6, 'Sa'], [0, 'Su']];
+
+  function meetingRowHtml(m) {
+    const days = m && m.days ? m.days : [];
+    return (
+      '<div class="meeting-row"' + (m && m.id ? ' data-meeting-id="' + m.id + '"' : '') + '>' +
+        '<div class="meeting-days" role="group" aria-label="Meeting days">' +
+          MEETING_DAYS.map(([v, label]) =>
+            '<label class="day-toggle"><input type="checkbox" class="meeting-day" value="' + v + '"' +
+              (days.indexOf(v) !== -1 ? ' checked' : '') + ' aria-label="' + label + '"><span>' + label + '</span></label>'
+          ).join('') +
+        '</div>' +
+        '<div class="meeting-fields">' +
+          '<input type="time" class="meeting-start" value="' + (m && m.start ? m.start : '') + '" aria-label="Start time">' +
+          '<span class="meeting-dash" aria-hidden="true">–</span>' +
+          '<input type="time" class="meeting-end" value="' + (m && m.end ? m.end : '') + '" aria-label="End time">' +
+          '<input type="text" class="meeting-location" maxlength="60" placeholder="Location" value="' + esc(m && m.location ? m.location : '') + '" aria-label="Location">' +
+          '<button class="btn-icon danger" type="button" data-action="remove-meeting" aria-label="Remove meeting time">' +
+            '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>' +
+          '</button>' +
+        '</div>' +
+      '</div>'
+    );
+  }
+
+  // Rows with no days or no start time are dropped; an end time that
+  // isn't after the start is discarded rather than blocking the save.
+  function readScheduleFromForm() {
+    return $$('#course-meetings .meeting-row').map((row) => {
+      const days = $$('.meeting-day', row).filter((cb) => cb.checked).map((cb) => +cb.value);
+      const start = $('.meeting-start', row).value;
+      let end = $('.meeting-end', row).value;
+      if (end && (!start || end <= start)) end = '';
+      return {
+        id: row.dataset.meetingId || uid(),
+        days, start, end,
+        location: $('.meeting-location', row).value.trim().slice(0, 60)
+      };
+    }).filter((m) => m.days.length > 0 && m.start);
+  }
+
   function openCourseDialog(id) {
     editingCourseId = id || null;
     const course = id ? courseById(id) : null;
@@ -566,6 +833,9 @@
         '<span class="swatch-fill" style="--swatch-color: var(--c-' + c.key + ')"></span>' +
       '</label>'
     ).join('');
+    $('#course-meetings').innerHTML = (course && course.schedule.length)
+      ? course.schedule.map(meetingRowHtml).join('')
+      : '';
     setFieldError($('#course-code'), $('#course-code-error'), null);
     setFieldError($('#course-name'), $('#course-name-error'), null);
     openDialog(dlg, $('#course-code'));
@@ -575,17 +845,17 @@
     e.preventDefault();
     const code = $('#course-code').value.trim();
     const name = $('#course-name').value.trim();
-    let ok = true;
     setFieldError($('#course-code'), $('#course-code-error'), code ? null : 'Required.');
     setFieldError($('#course-name'), $('#course-name-error'), name ? null : 'Give the course a name.');
     if (!code || !name) return;
     const color = ($('input[name="course-color"]:checked') || {}).value || COLORS[0].key;
+    const schedule = readScheduleFromForm();
     if (editingCourseId) {
       const c = courseById(editingCourseId);
-      if (c) { c.code = code; c.name = name; c.color = color; }
+      if (c) { c.code = code; c.name = name; c.color = color; c.schedule = schedule; }
       announce(code + ' updated.');
     } else {
-      state.courses.push({ id: uid(), code, name, color });
+      state.courses.push({ id: uid(), code, name, color, schedule });
       announce(code + ' added.' + (state.assignments.length === 0 ? ' Next: add an assignment.' : ''));
     }
     save();
@@ -595,6 +865,33 @@
 
   // ---- assignment ----
   let editingAssignmentId = null;
+
+  function subtaskFormRowHtml(s) {
+    return (
+      '<div class="subtask-form-row"' + (s && s.id ? ' data-sub-id="' + s.id + '"' : '') + '>' +
+        '<input type="text" class="subtask-title" maxlength="80" placeholder="e.g. Draft outline" value="' + esc(s ? s.title : '') + '" aria-label="Step description">' +
+        '<input type="date" class="subtask-due" value="' + (s && s.dueDate ? s.dueDate : '') + '" aria-label="Step due date (optional)">' +
+        '<button class="btn-icon danger" type="button" data-action="remove-subtask-row" aria-label="Remove step">' +
+          '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>' +
+        '</button>' +
+      '</div>'
+    );
+  }
+
+  // Existing rows carry data-sub-id so a step keeps its id and done state
+  // through an edit; blank-title rows are dropped.
+  function readSubtasksFromForm(existing) {
+    const prev = new Map((existing || []).map((s) => [s.id, s]));
+    return $$('#assignment-subtasks .subtask-form-row').map((row) => {
+      const title = $('.subtask-title', row).value.trim().slice(0, 80);
+      if (!title) return null;
+      const id = row.dataset.subId || uid();
+      const old = prev.get(id);
+      const due = $('.subtask-due', row).value;
+      return { id, title, dueDate: ISO_RE.test(due) ? due : null, done: old ? old.done : false };
+    }).filter(Boolean);
+  }
+
   function openAssignmentDialog(id) {
     if (state.courses.length === 0) {
       announce('Add a course first — assignments need a home.');
@@ -614,6 +911,7 @@
     $('#assignment-type').value = a ? a.type : 'assignment';
     $('#assignment-due').value = a ? a.dueDate : '';
     $('#assignment-notes').value = a ? (a.notes || '') : '';
+    $('#assignment-subtasks').innerHTML = a ? a.subtasks.map(subtaskFormRowHtml).join('') : '';
     setFieldError($('#assignment-title'), $('#assignment-title-error'), null);
     setFieldError($('#assignment-due'), $('#assignment-due-error'), null);
     openDialog(dlg, $('#assignment-title'));
@@ -626,16 +924,17 @@
     setFieldError($('#assignment-title'), $('#assignment-title-error'), title ? null : 'What’s due?');
     setFieldError($('#assignment-due'), $('#assignment-due-error'), due ? null : 'Pick a due date.');
     if (!title || !due) return;
+    const existing = editingAssignmentId ? state.assignments.find((x) => x.id === editingAssignmentId) : null;
     const data = {
       title,
       courseId: $('#assignment-course').value,
       type: $('#assignment-type').value,
       dueDate: due,
-      notes: $('#assignment-notes').value.trim()
+      notes: $('#assignment-notes').value.trim(),
+      subtasks: readSubtasksFromForm(existing ? existing.subtasks : [])
     };
-    if (editingAssignmentId) {
-      const a = state.assignments.find((x) => x.id === editingAssignmentId);
-      if (a) Object.assign(a, data);
+    if (existing) {
+      Object.assign(existing, data);
       announce('“' + title + '” updated.');
     } else {
       state.assignments.push(Object.assign({ id: uid(), status: 'todo' }, data));
@@ -645,6 +944,313 @@
     $('#dlg-assignment').close();
     render();
   });
+
+  // ============================================================
+  // Import — Canvas .ics, syllabus text, or syllabus PDF.
+  // Every path feeds the same review table; nothing is written to
+  // state until the user confirms there.
+  // ============================================================
+  let importRows = [];
+  let importUnchanged = 0;
+
+  function importCtx() {
+    return {
+      semesterStart: state.semester ? state.semester.startDate : null,
+      semesterEnd: state.semester ? state.semester.endDate : null,
+      todayISO: todayISO()
+    };
+  }
+
+  function setImportError(msg) {
+    const el = $('#import-error');
+    el.textContent = msg || '';
+    el.hidden = !msg;
+  }
+
+  function openImportDialog() {
+    setImportError(null);
+    $('#import-text').value = '';
+    $('#import-dropzone').classList.remove('busy');
+    openDialog($('#dlg-import'), $('#import-dropzone'));
+  }
+
+  function parseImportText() {
+    const text = $('#import-text').value;
+    if (!text.trim()) { setImportError('Paste the schedule portion of your syllabus first.'); return; }
+    const rows = SHQ.parseSyllabusText(text, importCtx());
+    if (!rows.length) { setImportError('No dated lines found. Make sure each line has a date, like “Sept 12 — Essay 1”.'); return; }
+    buildSyllabusReview(rows);
+  }
+
+  function handleImportFile(file) {
+    if (!file) return;
+    const name = (file.name || '').toLowerCase();
+    setImportError(null);
+    if (name.endsWith('.ics') || file.type === 'text/calendar') {
+      file.text().then((text) => {
+        const events = SHQ.parseICS(text);
+        if (!events.length) { setImportError('No events found in that calendar file.'); return; }
+        buildCanvasReview(events);
+      }, () => setImportError('Couldn’t read that file.'));
+    } else if (name.endsWith('.pdf') || file.type === 'application/pdf') {
+      importPdf(file);
+    } else {
+      setImportError('That file type isn’t supported — use a Canvas .ics or a PDF, or paste text below.');
+    }
+  }
+
+  function buildSyllabusReview(parsed) {
+    importUnchanged = 0;
+    const defaultCourse = state.courses.length === 1 ? state.courses[0].id : '';
+    importRows = parsed.map((p) => ({
+      include: true, title: p.title, dueDate: p.dueDate, type: p.type,
+      courseKey: defaultCourse, badge: p.confidence === 'low' ? 'check date' : null,
+      locked: false, action: 'create', uid: null, id: null
+    }));
+    openReviewDialog(importRows.length + ' dated item' + (importRows.length === 1 ? '' : 's') +
+      ' found. Fix anything that looks off and pick a course for each.');
+  }
+
+  function buildCanvasReview(events) {
+    const result = SHQ.planCanvasMerge(events, state.assignments);
+    importUnchanged = result.unchanged;
+    importRows = result.plan.map((p) => {
+      if (p.action === 'update') {
+        const a = state.assignments.find((x) => x.id === p.id);
+        return { include: true, title: p.event.title, dueDate: p.event.dueDate, type: a.type,
+                 courseKey: a.courseId, badge: 'update', locked: true, action: 'update', id: p.id, uid: p.event.uid };
+      }
+      const ev = p.event;
+      const match = SHQ.matchCourse(ev.courseTag, state.courses);
+      const proposed = ev.courseTag ? SHQ.proposeCourseCode(ev.courseTag) : '';
+      return { include: ev.kind === 'assignment', title: ev.title, dueDate: ev.dueDate, type: ev.type,
+               courseKey: match ? match.id : (proposed ? '__new__:' + proposed : ''),
+               badge: ev.kind === 'event' ? 'event' : 'new', locked: false, action: 'create',
+               uid: ev.uid || null, id: null };
+    });
+    if (!importRows.length) {
+      setImportError(importUnchanged
+        ? 'Everything in that feed is already here and up to date (' + importUnchanged + ' item' + (importUnchanged === 1 ? '' : 's') + ').'
+        : 'Nothing importable found in that feed.');
+      return;
+    }
+    let summary = 'From your Canvas calendar. Non-assignment events (lectures, office hours) start unchecked.';
+    if (importUnchanged) {
+      summary += ' ' + importUnchanged + ' item' + (importUnchanged === 1 ? ' is' : 's are') + ' already up to date and not shown.';
+    }
+    openReviewDialog(summary);
+  }
+
+  function openReviewDialog(summary) {
+    if ($('#dlg-import').open) $('#dlg-import').close();
+    $('#import-review-summary').textContent = summary;
+    renderReviewTable();
+    openDialog($('#dlg-import-review'), $('#import-commit'));
+  }
+
+  function proposedCodes() {
+    const set = new Set();
+    importRows.forEach((r) => {
+      if (r.courseKey && r.courseKey.indexOf('__new__:') === 0) set.add(r.courseKey.slice(8));
+    });
+    return Array.from(set);
+  }
+
+  function renderReviewTable() {
+    const codes = proposedCodes();
+    const courseOptions = (sel) =>
+      '<option value=""' + (sel === '' ? ' selected' : '') + '>— pick a course —</option>' +
+      state.courses.map((c) =>
+        '<option value="' + c.id + '"' + (sel === c.id ? ' selected' : '') + '>' + esc(c.code) + '</option>').join('') +
+      codes.map((code) => {
+        const k = '__new__:' + code;
+        return '<option value="' + esc(k) + '"' + (sel === k ? ' selected' : '') + '>Create “' + esc(code) + '”</option>';
+      }).join('');
+    $('#import-review-table').innerHTML =
+      '<table class="review-table"><thead><tr>' +
+        '<th class="col-inc"><span class="visually-hidden">Include</span></th>' +
+        '<th>What’s due</th><th>Due date</th><th>Type</th><th>Course</th><th></th>' +
+      '</tr></thead><tbody>' +
+      importRows.map((r, i) =>
+        '<tr data-idx="' + i + '"' + (r.include ? '' : ' class="row-excluded"') + '>' +
+          '<td class="col-inc"><input type="checkbox" class="review-include"' + (r.include ? ' checked' : '') + ' aria-label="Include this item"></td>' +
+          '<td><input type="text" class="review-title" maxlength="80" value="' + esc(r.title) + '" aria-label="Title"></td>' +
+          '<td><input type="date" class="review-date" value="' + r.dueDate + '" aria-label="Due date"></td>' +
+          '<td><select class="review-type" aria-label="Type"' + (r.locked ? ' disabled' : '') + '>' +
+            Object.keys(TYPES).map((t) =>
+              '<option value="' + t + '"' + (r.type === t ? ' selected' : '') + '>' + TYPES[t] + '</option>').join('') +
+          '</select></td>' +
+          '<td>' + (r.locked
+            ? '<span class="review-course-locked">' + esc((courseById(r.courseKey) || { code: '—' }).code) + '</span>'
+            : '<select class="review-course" aria-label="Course">' + courseOptions(r.courseKey) + '</select>') + '</td>' +
+          '<td>' + (r.badge ? '<span class="review-badge badge-' + r.badge.replace(/\s+/g, '-') + '">' + r.badge + '</span>' : '') + '</td>' +
+        '</tr>'
+      ).join('') +
+      '</tbody></table>';
+    updateCommitButton();
+  }
+
+  function importableRows() {
+    return importRows.filter((r) => r.include && r.title.trim() && ISO_RE.test(r.dueDate) &&
+      (r.action === 'update' || r.courseKey));
+  }
+
+  function updateCommitButton() {
+    const n = importableRows().length;
+    const btn = $('#import-commit');
+    btn.textContent = 'Import ' + n + ' item' + (n === 1 ? '' : 's');
+    btn.disabled = n === 0;
+  }
+
+  function syncReviewFromInput(target) {
+    const tr = target.closest('tr[data-idx]');
+    if (!tr) return;
+    const r = importRows[+tr.dataset.idx];
+    if (!r) return;
+    if (target.classList.contains('review-include')) {
+      r.include = target.checked;
+      tr.classList.toggle('row-excluded', !r.include);
+    } else if (target.classList.contains('review-title')) r.title = target.value;
+    else if (target.classList.contains('review-date')) r.dueDate = target.value;
+    else if (target.classList.contains('review-type')) r.type = target.value;
+    else if (target.classList.contains('review-course')) r.courseKey = target.value;
+    updateCommitButton();
+  }
+
+  function commitImport() {
+    const rows = importableRows();
+    if (!rows.length) return;
+    const codeToId = new Map(); // normalized new-course code → created id
+    let created = 0, updated = 0, newCourses = 0;
+    rows.forEach((r) => {
+      if (r.action === 'update') {
+        const a = state.assignments.find((x) => x.id === r.id);
+        if (a) { a.title = r.title.trim().slice(0, 80); a.dueDate = r.dueDate; updated += 1; }
+        return;
+      }
+      let courseId = r.courseKey;
+      if (courseId.indexOf('__new__:') === 0) {
+        const code = courseId.slice(8);
+        const norm = SHQ.normCode(code);
+        if (codeToId.has(norm)) {
+          courseId = codeToId.get(norm);
+        } else {
+          const existing = state.courses.find((c) => SHQ.normCode(c.code) === norm);
+          if (existing) {
+            courseId = existing.id;
+          } else {
+            const c = { id: uid(), code: code.slice(0, 16), name: code.slice(0, 60), color: leastUsedColor(), schedule: [] };
+            state.courses.push(c);
+            courseId = c.id;
+            newCourses += 1;
+          }
+          codeToId.set(norm, courseId);
+        }
+      }
+      const a = {
+        id: uid(), courseId,
+        title: r.title.trim().slice(0, 80),
+        type: TYPES[r.type] ? r.type : 'assignment',
+        dueDate: r.dueDate, status: 'todo', notes: '', subtasks: []
+      };
+      if (r.uid) a.canvasUid = r.uid.slice(0, 120);
+      state.assignments.push(a);
+      created += 1;
+    });
+    save();
+    $('#dlg-import-review').close();
+    const bits = [];
+    if (created) bits.push(created + ' added');
+    if (updated) bits.push(updated + ' updated');
+    if (newCourses) bits.push(newCourses + ' course' + (newCourses === 1 ? '' : 's') + ' created');
+    announce('Import complete — ' + bits.join(', ') + '.');
+    render();
+  }
+
+  // ---- PDF import (pdf.js, lazy-loaded from a pinned CDN build only
+  // when a PDF is actually dropped; failure falls back to paste-text) ----
+  let pdfJsPromise = null;
+  const PDFJS_BASE = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.2.67/legacy/build/';
+
+  function loadPdfJs() {
+    if (!pdfJsPromise) {
+      // Importing the worker module onto the main thread makes pdf.js use
+      // its in-process "fake worker" — no separate Worker to spawn, one
+      // less thing to fail. Fine at this scale (syllabi, ≤30 pages).
+      pdfJsPromise = Promise.all([
+        import(PDFJS_BASE + 'pdf.min.mjs'),
+        import(PDFJS_BASE + 'pdf.worker.min.mjs')
+      ]).then(([mod, workerMod]) => {
+        globalThis.pdfjsWorker = workerMod;
+        return mod && mod.getDocument ? mod : window.pdfjsLib;
+      });
+      pdfJsPromise.catch(() => { pdfJsPromise = null; }); // allow retry after a failed load
+    }
+    return pdfJsPromise;
+  }
+
+  async function extractPdfText(file) {
+    const lib = await loadPdfJs();
+    const doc = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+    const pages = Math.min(doc.numPages, 30);
+    let text = '';
+    for (let p = 1; p <= pages; p++) {
+      const page = await doc.getPage(p);
+      const content = await page.getTextContent();
+      let lastY = null;
+      content.items.forEach((item) => {
+        if (!item.str) return;
+        const y = item.transform ? item.transform[5] : null;
+        if (lastY !== null && y !== null && Math.abs(y - lastY) > 2) text += '\n';
+        else if (text && !/\s$/.test(text)) text += ' ';
+        text += item.str;
+        if (y !== null) lastY = y;
+      });
+      text += '\n';
+    }
+    return text;
+  }
+
+  function importPdf(file) {
+    const dz = $('#import-dropzone');
+    dz.classList.add('busy');
+    extractPdfText(file).then((text) => {
+      dz.classList.remove('busy');
+      const rows = SHQ.parseSyllabusText(text, importCtx());
+      if (!rows.length) {
+        setImportError('Couldn’t find dated lines in that PDF — copy and paste the schedule text below instead.');
+        $('#import-text').focus();
+        return;
+      }
+      buildSyllabusReview(rows);
+    }).catch((err) => {
+      console.error('Semester HQ: PDF import failed —', err);
+      dz.classList.remove('busy');
+      setImportError('Couldn’t read that PDF — copy and paste the syllabus text below instead.');
+      $('#import-text').focus();
+    });
+  }
+
+  // Dropzone wiring (elements exist statically in index.html)
+  (function initImportDropzone() {
+    const dz = $('#import-dropzone');
+    const fileInput = $('#import-file');
+    dz.addEventListener('click', () => fileInput.click());
+    dz.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
+    });
+    ['dragover', 'dragenter'].forEach((t) => dz.addEventListener(t, (e) => {
+      e.preventDefault();
+      dz.classList.add('dragover');
+    }));
+    ['dragleave', 'drop'].forEach((t) => dz.addEventListener(t, (e) => {
+      e.preventDefault();
+      dz.classList.remove('dragover');
+    }));
+    dz.addEventListener('drop', (e) => {
+      handleImportFile(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]);
+    });
+  })();
 
   // ============================================================
   // Sample data (relative to today so the dashboard always looks alive)
@@ -677,7 +1283,7 @@
       { c: 0, t: 'Hi-fi prototype in Figma', type: 'project', d: 19 },
       { c: 1, t: 'Group presentation: net neutrality', type: 'project', d: 20 }
     ];
-    state = {
+    state = normalizeState({
       sample: true,
       semester: { name: 'Sample Semester', startDate: start, endDate: end },
       courses: C,
@@ -690,7 +1296,7 @@
         status: a.done ? 'done' : 'todo',
         notes: ''
       }))
-    };
+    });
     save();
     announce('Sample semester loaded. This is demo data — clear it anytime.');
     location.hash = '#week';
@@ -702,7 +1308,7 @@
   // ============================================================
   function exportData() {
     const payload = {
-      app: 'semester-hq', version: 1,
+      app: 'semester-hq', version: 2,
       exportedAt: new Date().toISOString(),
       data: { semester: state.semester, courses: state.courses, assignments: state.assignments }
     };
@@ -714,10 +1320,15 @@
     a.click();
     a.remove();
     URL.revokeObjectURL(a.href);
+    state.meta.lastBackupAt = new Date().toISOString();
+    state.meta.changesSinceBackup = 0;
+    save({ silent: true });
     announce('Backup downloaded.');
+    render();
   }
 
-  const ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
+  // Accepts both version-1 (no schedule/subtasks) and version-2 backups;
+  // normalizeState supplies defaults and scrubs the new fields.
   function validateBackup(obj) {
     if (!obj || typeof obj !== 'object') return null;
     const d = obj.data && typeof obj.data === 'object' ? obj.data : obj;
@@ -733,9 +1344,10 @@
       if (typeof c.code !== 'string' || typeof c.name !== 'string') return null;
       out.courses.push({
         id: typeof c.id === 'string' ? c.id : uid(),
-        code: c.code.slice(0, 12),
+        code: c.code.slice(0, 16),
         name: c.name.slice(0, 60),
-        color: colorKeys.includes(c.color) ? c.color : 'green'
+        color: colorKeys.includes(c.color) ? c.color : 'green',
+        schedule: c.schedule
       });
     }
     const courseIds = new Set(out.courses.map((c) => c.id));
@@ -749,10 +1361,12 @@
         type: TYPES[a.type] ? a.type : 'assignment',
         dueDate: a.dueDate,
         status: a.status === 'done' ? 'done' : 'todo',
-        notes: typeof a.notes === 'string' ? a.notes.slice(0, 280) : ''
+        notes: typeof a.notes === 'string' ? a.notes.slice(0, 280) : '',
+        subtasks: a.subtasks,
+        canvasUid: a.canvasUid
       });
     }
-    return out;
+    return normalizeState(out);
   }
 
   async function importData(file) {
@@ -823,6 +1437,32 @@
       case 'edit-assignment': openAssignmentDialog(rowId); break;
       case 'load-sample': loadSample(); break;
       case 'clear-sample': clearAll(true); break;
+      case 'export-backup': exportData(); break;
+      case 'add-meeting':
+        $('#course-meetings').insertAdjacentHTML('beforeend', meetingRowHtml(null));
+        $('.meeting-row:last-child .meeting-day', $('#course-meetings')).focus();
+        break;
+      case 'remove-meeting': btn.closest('.meeting-row').remove(); break;
+      case 'add-subtask-row': {
+        $('#assignment-subtasks').insertAdjacentHTML('beforeend', subtaskFormRowHtml(null));
+        $('.subtask-form-row:last-child .subtask-title', $('#assignment-subtasks')).focus();
+        break;
+      }
+      case 'remove-subtask-row': btn.closest('.subtask-form-row').remove(); break;
+      case 'import-assignments': openImportDialog(); break;
+      case 'parse-import-text': parseImportText(); break;
+      case 'commit-import': commitImport(); break;
+      case 'toggle-subtasks': {
+        if (expandedSubtasks.has(rowId)) expandedSubtasks.delete(rowId);
+        else expandedSubtasks.add(rowId);
+        render();
+        break;
+      }
+      case 'dismiss-backup-nudge':
+        state.meta.nudgeSnoozedUntil = addDays(todayISO(), 7);
+        save({ silent: true });
+        render();
+        break;
       case 'close-dialog': btn.closest('dialog').close(); break;
       case 'delete-assignment': {
         const a = state.assignments.find((x) => x.id === rowId);
@@ -856,6 +1496,23 @@
 
   // check-off (change survives re-render because rows re-render immediately)
   document.addEventListener('change', (e) => {
+    if (e.target.classList.contains('subtask-check')) {
+      const row = e.target.closest('[data-id]');
+      const a = row && state.assignments.find((x) => x.id === row.dataset.id);
+      if (!a) return;
+      const s = a.subtasks.find((x) => x.id === e.target.dataset.subId);
+      if (!s) return;
+      s.done = e.target.checked;
+      save();
+      announce('Step “' + s.title + '” marked ' + (s.done ? 'done.' : 'not done.'));
+      if (s.done && row.classList.contains('subtask-row')) {
+        row.classList.add('just-done');
+        setTimeout(render, 300);
+      } else {
+        render();
+      }
+      return;
+    }
     if (e.target.classList.contains('item-check')) {
       const row = e.target.closest('[data-id]');
       const a = state.assignments.find((x) => x.id === row.dataset.id);
@@ -875,7 +1532,19 @@
     if (e.target.id === 'file-import' && e.target.files[0]) {
       importData(e.target.files[0]);
       e.target.value = '';
+      return;
     }
+    if (e.target.id === 'import-file' && e.target.files[0]) {
+      handleImportFile(e.target.files[0]);
+      e.target.value = '';
+      return;
+    }
+    if (e.target.closest('#dlg-import-review')) syncReviewFromInput(e.target);
+  });
+
+  // Live count updates while typing a title in the review table
+  document.addEventListener('input', (e) => {
+    if (e.target.classList && e.target.classList.contains('review-title')) syncReviewFromInput(e.target);
   });
 
   $('#btn-export').addEventListener('click', exportData);
@@ -906,6 +1575,149 @@
       return v && v.assignments.length === 0 && v.courses.length === 1;
     })());
     t('backup validation rejects bad dates', validateBackup({ data: { semester: { name: 'S', startDate: 'sep 1', endDate: '2026-12-18' }, courses: [], assignments: [] } }) === null);
+
+    // --- migration / normalizeState ---
+    t('normalizeState defaults v1 data', (() => {
+      const v = normalizeState({ courses: [{ id: 'c1', code: 'A', name: 'B', color: 'green' }], assignments: [{ id: 'a1', courseId: 'c1', title: 'x', type: 'quiz', dueDate: '2026-09-01', status: 'todo', notes: '' }] });
+      return v.courses[0].schedule.length === 0 && v.assignments[0].subtasks.length === 0 &&
+        v.meta.lastBackupAt === null && v.meta.changesSinceBackup === 0 && v.meta.nudgeSnoozedUntil === null;
+    })());
+    t('normalizeState drops malformed schedule entries', (() => {
+      const v = normalizeState({ courses: [{ id: 'c1', code: 'A', name: 'B', color: 'green', schedule: [
+        { days: [9], start: '10:00' }, { days: [1, 3], start: '9:30' },
+        { days: [2], start: '09:30', end: '08:00', location: 'Hall' }] }] });
+      const s = v.courses[0].schedule;
+      return s.length === 1 && s[0].days.join(',') === '2' && s[0].end === '' && s[0].location === 'Hall';
+    })());
+    t('normalizeState keeps valid subtasks, drops junk', (() => {
+      const v = normalizeState({ assignments: [{ id: 'a1', courseId: 'c1', title: 'x', dueDate: '2026-09-01', subtasks: [{ title: 'ok', dueDate: '2026-08-30' }, { title: '  ' }, 'nope'] }] });
+      const s = v.assignments[0].subtasks;
+      return s.length === 1 && s[0].done === false && s[0].dueDate === '2026-08-30' && typeof s[0].id === 'string';
+    })());
+    t('v1 backup accepted with defaults', (() => {
+      const v = validateBackup({ app: 'semester-hq', version: 1, data: { semester: { name: 'S', startDate: '2026-08-24', endDate: '2026-12-11' }, courses: [{ id: 'c1', code: 'A', name: 'B', color: 'green' }], assignments: [{ id: 'a1', courseId: 'c1', title: 'x', dueDate: '2026-09-01' }] } });
+      return !!v && v.assignments[0].subtasks.length === 0 && v.courses[0].schedule.length === 0 && v.meta.changesSinceBackup === 0;
+    })());
+    t('v2 backup round-trips schedule + canvasUid', (() => {
+      const v = validateBackup({ version: 2, data: { semester: null, courses: [{ id: 'c1', code: 'INFO-I 300', name: 'HCI', color: 'green', schedule: [{ id: 'm1', days: [1, 3, 5], start: '09:30', end: '10:45', location: 'Ball 013' }] }], assignments: [{ id: 'a1', courseId: 'c1', title: 'x', dueDate: '2026-09-01', canvasUid: 'event-assignment-1@instructure.com', subtasks: [{ id: 's1', title: 'draft', dueDate: null, done: true }] }] } });
+      return !!v && v.courses[0].schedule.length === 1 && v.assignments[0].canvasUid === 'event-assignment-1@instructure.com' && v.assignments[0].subtasks[0].done === true;
+    })());
+
+    // --- schedule helpers ---
+    t('formatMeetingDays MWF', SHQ.formatMeetingDays([1, 3, 5]) === 'MWF');
+    t('formatMeetingDays TuTh', SHQ.formatMeetingDays([4, 2]) === 'TuTh');
+    t('formatMeetingDays Sunday last', SHQ.formatMeetingDays([0, 1]) === 'MSu');
+    t('formatTime12 morning', SHQ.formatTime12('09:30') === '9:30 AM');
+    t('formatTime12 afternoon', SHQ.formatTime12('13:05') === '1:05 PM');
+    t('formatTime12 noon and midnight', SHQ.formatTime12('12:00') === '12:00 PM' && SHQ.formatTime12('00:15') === '12:15 AM');
+    t('meetingsToday filters and sorts by start', (() => {
+      const cs = [
+        { code: 'A', schedule: [{ days: [1, 3], start: '13:00' }] },
+        { code: 'B', schedule: [{ days: [1], start: '09:00' }] },
+        { code: 'C', schedule: [{ days: [2], start: '08:00' }] }
+      ];
+      const m = SHQ.meetingsToday(cs, 1);
+      return m.length === 2 && m[0].course.code === 'B' && m[1].course.code === 'A';
+    })());
+
+    // --- type inference ---
+    t('inferType: final project is a project', SHQ.inferType('Final project due') === 'project');
+    t('inferType: midterm exam', SHQ.inferType('Midterm exam') === 'exam');
+    t('inferType: quiz beats reading', SHQ.inferType('Reading quiz: Ch. 5') === 'quiz');
+    t('inferType: chapter reading', SHQ.inferType('Ch. 5 response') === 'reading');
+    t('inferType: default assignment', SHQ.inferType('Problem set 4') === 'assignment');
+
+    // --- syllabus parsing ---
+    const ctxFall = { semesterStart: '2026-08-24', semesterEnd: '2026-12-11', todayISO: '2026-07-04' };
+    t('syllabus: month-name date + type', (() => {
+      const r = SHQ.parseSyllabusText('Sept 12 — Reading response 2', ctxFall);
+      return r.length === 1 && r[0].dueDate === '2026-09-12' && r[0].title === 'Reading response 2' && r[0].type === 'reading';
+    })());
+    t('syllabus: numeric date', (() => {
+      const r = SHQ.parseSyllabusText('9/12 Quiz 3', ctxFall);
+      return r.length === 1 && r[0].dueDate === '2026-09-12' && r[0].type === 'quiz';
+    })());
+    t('syllabus: explicit year kept, trailing “due” stripped', (() => {
+      const r = SHQ.parseSyllabusText('September 12, 2027: Essay 1 due', ctxFall);
+      return r.length === 1 && r[0].dueDate === '2027-09-12' && r[0].title === 'Essay 1';
+    })());
+    t('syllabus: range uses end date', (() => {
+      const r = SHQ.parseSyllabusText('Sept 12–14 Project presentations', ctxFall);
+      return r.length === 1 && r[0].dueDate === '2026-09-14' && r[0].type === 'project';
+    })());
+    t('syllabus: dateless line skipped', SHQ.parseSyllabusText('Bring your laptop to class', ctxFall).length === 0);
+    t('syllabus: impossible date skipped', SHQ.parseSyllabusText('Feb 31 — ghost item', ctxFall).length === 0);
+    t('syllabus: “week of” flagged low confidence', (() => {
+      const r = SHQ.parseSyllabusText('Week of Oct 5 — peer review workshop', ctxFall);
+      return r.length === 1 && r[0].confidence === 'low' && r[0].dueDate === '2026-10-05';
+    })());
+    t('syllabus: January lands in end-year across new year', (() => {
+      const r = SHQ.parseSyllabusText('Jan 20 — winter session paper', { semesterStart: '2026-11-30', semesterEnd: '2027-03-15', todayISO: '2026-11-01' });
+      return r.length === 1 && r[0].dueDate === '2027-01-20';
+    })());
+    t('syllabus: no-semester year bumps forward for fall prep', (() => {
+      const r = SHQ.parseSyllabusText('Jan 15 — response paper', { todayISO: '2026-07-04' });
+      return r.length === 1 && r[0].dueDate === '2027-01-15';
+    })());
+
+    // --- ICS parsing ---
+    const icsSample = 'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:event-assignment-123@instructure.com\r\nSUMMARY:Essay 1\\, final draft [FA26: ENG-W 131 12345]\r\nDTSTART;VALUE=DATE:20261009\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:event-999@instructure.com\r\nSUMMARY:Office hours [FA26: ENG-W 131 12345]\r\nDTSTART:20261010T170000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n';
+    t('ics: parses events with kinds', (() => {
+      const ev = SHQ.parseICS(icsSample);
+      return ev.length === 2 && ev[0].kind === 'assignment' && ev[1].kind === 'event';
+    })());
+    t('ics: unescapes commas and strips course tag', (() => {
+      const ev = SHQ.parseICS(icsSample)[0];
+      return ev.title === 'Essay 1, final draft' && ev.courseTag === 'FA26: ENG-W 131 12345';
+    })());
+    t('ics: VALUE=DATE stays literal', SHQ.parseICS(icsSample)[0].dueDate === '2026-10-09');
+    t('ics: folded SUMMARY unfolds', (() => {
+      // RFC 5545 fold = CRLF + one space; the second space below is content
+      const folded = 'BEGIN:VEVENT\r\nUID:event-assignment-7\r\nSUMMARY:Long title that\r\n  continues [HIST 101]\r\nDTSTART;VALUE=DATE:20261101\r\nEND:VEVENT';
+      const ev = SHQ.parseICS(folded);
+      return ev.length === 1 && ev[0].title === 'Long title that continues' && ev[0].courseTag === 'HIST 101';
+    })());
+    t('ics: Z datetime converts through local zone', (() => {
+      const d = new Date(Date.UTC(2026, 9, 10, 4, 59, 59));
+      const expect = toISO(d);
+      return SHQ.icsDate('20261010T045959Z') === expect;
+    })());
+
+    // --- course matching ---
+    t('matchCourse finds code inside Canvas tag', (() => {
+      const c = SHQ.matchCourse('FA26: INFO-I 300 12345', [{ id: '1', code: 'INFO-I 300' }]);
+      return !!c && c.id === '1';
+    })());
+    t('proposeCourseCode strips term and section', SHQ.proposeCourseCode('FA26: ENG-W 131 12345') === 'ENG-W 131');
+
+    // --- Canvas merge planning ---
+    t('merge: re-import updates date, never status, no dupes', (() => {
+      const existing = [{ id: 'a1', canvasUid: 'u1', title: 'Essay 1', dueDate: '2026-10-09', status: 'done' }];
+      const res = SHQ.planCanvasMerge([{ uid: 'u1', title: 'Essay 1', dueDate: '2026-10-16', kind: 'assignment' }], existing);
+      return res.plan.length === 1 && res.plan[0].action === 'update' &&
+        res.plan[0].changes.dueDate === '2026-10-16' && !('title' in res.plan[0].changes) &&
+        !('status' in res.plan[0].changes);
+    })());
+    t('merge: identical item counts as unchanged', (() => {
+      const res = SHQ.planCanvasMerge([{ uid: 'u1', title: 'Essay 1', dueDate: '2026-10-09', kind: 'assignment' }],
+        [{ id: 'a1', canvasUid: 'u1', title: 'Essay 1', dueDate: '2026-10-09', status: 'todo' }]);
+      return res.plan.length === 0 && res.unchanged === 1;
+    })());
+    t('merge: unknown uid creates', (() => {
+      const res = SHQ.planCanvasMerge([{ uid: 'u2', title: 'Quiz', dueDate: '2026-10-09', kind: 'assignment' }], []);
+      return res.plan.length === 1 && res.plan[0].action === 'create';
+    })());
+
+    // --- due-entry collection ---
+    t('dueEntries hides steps of done parents', (() => {
+      const es = dueEntries([
+        { id: 'a1', dueDate: '2026-09-10', status: 'done', subtasks: [{ id: 's1', title: 'x', dueDate: '2026-09-08', done: false }] },
+        { id: 'a2', dueDate: '2026-09-12', status: 'todo', subtasks: [{ id: 's2', title: 'y', dueDate: '2026-09-09', done: false }, { id: 's3', title: 'z', dueDate: null, done: false }] }
+      ]);
+      return es.length === 3 && es.filter((e) => e.kind === 'subtask').length === 1 &&
+        es.find((e) => e.kind === 'subtask').s.id === 's2';
+    })());
+
     console.log('Self-tests complete.');
   }
 
