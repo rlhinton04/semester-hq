@@ -166,7 +166,7 @@
   // ============================================================
   // Routing (hash → view)
   // ============================================================
-  const VIEWS = ['week', 'upcoming', 'courses', 'about'];
+  const VIEWS = ['week', 'upcoming', 'courses', 'calendar', 'about'];
   function currentView() {
     const h = location.hash.replace('#', '');
     return VIEWS.includes(h) ? h : 'week';
@@ -188,6 +188,7 @@
     renderWeek();
     renderUpcoming();
     renderCourses();
+    renderCalendar();
   }
 
   function chipHtml(course) {
@@ -682,6 +683,112 @@
       '</div>';
   }
 
+  // ---- Calendar ----
+  // Month being shown, as "YYYY-MM". Session-only on purpose: a reload
+  // should always land on the current month.
+  let calCursor = null;
+  const fmtMonthYear = new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' });
+  const CAL_DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  function calMonthLabel(cursor) {
+    const [y, m] = cursor.split('-').map(Number);
+    return fmtMonthYear.format(new Date(y, m - 1, 1));
+  }
+  function calShift(cursor, delta) {
+    let [y, m] = cursor.split('-').map(Number);
+    m += delta;
+    if (m < 1) { m += 12; y -= 1; } else if (m > 12) { m -= 12; y += 1; }
+    return y + '-' + String(m).padStart(2, '0');
+  }
+
+  function calEventHtml(e) {
+    const a = e.a;
+    const course = courseById(a.courseId);
+    const done = e.kind === 'assignment' ? a.status === 'done' : e.s.done;
+    const overdue = !done && e.dueDate < todayISO();
+    const title = e.kind === 'subtask' ? e.s.title : a.title;
+    const spine = course ? ' style="--row-spine: var(--c-' + course.color + ')"' : '';
+    return (
+      '<button class="cal-event' + (done ? ' done-item' : '') + (overdue ? ' cal-overdue' : '') + '" type="button" ' +
+        'data-id="' + a.id + '" data-action="edit-assignment"' + spine +
+        ' aria-label="Edit &quot;' + esc(title) + '&quot;">' +
+        (e.kind === 'subtask' ? '<span class="subtask-arrow" aria-hidden="true">↳</span> ' : '') +
+        '<span class="cal-event-title">' + esc(title) + '</span>' +
+      '</button>'
+    );
+  }
+
+  function renderCalendar() {
+    const el = $('#calendar-content');
+    if (!state.semester) {
+      el.innerHTML =
+        '<div class="empty">' +
+          '<h2>Set up your semester first</h2>' +
+          '<p>The calendar shows every class meeting and due date, one month at a glance.</p>' +
+          '<div class="empty-actions"><button class="btn btn-primary" type="button" data-action="setup-semester">Set up my semester</button></div>' +
+        '</div>';
+      return;
+    }
+
+    if (!calCursor) calCursor = todayISO().slice(0, 7);
+    const [y, m] = calCursor.split('-').map(Number);
+    const weeks = SHQ.monthGrid(y, m - 1);
+    const today = todayISO();
+    const semStart = state.semester.startDate, semEnd = state.semester.endDate;
+
+    const byDate = new Map();
+    dueEntries(state.assignments).forEach((e) => {
+      if (!byDate.has(e.dueDate)) byDate.set(e.dueDate, []);
+      byDate.get(e.dueDate).push(e);
+    });
+    // Meeting dots per weekday: index 0=Mon … 6=Sun to match the grid.
+    const dotsByCol = CAL_DOW.map((_, i) => {
+      const meets = SHQ.meetingsToday(state.courses, (i + 1) % 7);
+      const colors = [];
+      meets.forEach((x) => { if (colors.indexOf(x.course.color) === -1) colors.push(x.course.color); });
+      return colors.map((c) => '<span class="cal-dot" style="background: var(--c-' + c + ')"></span>').join('');
+    });
+
+    const cells = weeks.map((week) => week.map((iso, i) => {
+      const inMonth = iso.slice(0, 7) === calCursor;
+      const inSem = iso >= semStart && iso <= semEnd;
+      const cls = 'cal-cell' +
+        (inMonth ? '' : ' cal-outside') +
+        (inSem ? '' : ' cal-out-sem') +
+        (iso === today ? ' is-today' : '');
+      const dayEntries = byDate.get(iso) || [];
+      const shown = dayEntries.slice(0, 3);
+      const moreN = dayEntries.length - shown.length;
+      const semTag = iso === semStart ? '<span class="cal-sem-tag">starts</span>'
+        : iso === semEnd ? '<span class="cal-sem-tag">ends</span>' : '';
+      const dots = inMonth && inSem && dotsByCol[i]
+        ? '<span class="cal-dots" aria-hidden="true">' + dotsByCol[i] + '</span>' : '';
+      return (
+        '<div class="' + cls + '">' +
+          '<div class="cal-cell-top">' +
+            '<button class="cal-daynum" type="button" data-action="add-assignment-date" data-date="' + iso + '" ' +
+              'aria-label="Add assignment due ' + fFull(iso) + '">' + Number(iso.slice(8, 10)) + '</button>' +
+            semTag + dots +
+          '</div>' +
+          shown.map(calEventHtml).join('') +
+          (moreN > 0 ? '<span class="cal-more">+' + moreN + ' more</span>' : '') +
+        '</div>'
+      );
+    }).join('')).join('');
+
+    el.innerHTML =
+      '<div class="view-header cal-toolbar">' +
+        '<h2 class="cal-title">' + calMonthLabel(calCursor) + '</h2>' +
+        '<div class="cal-nav">' +
+          '<button class="btn btn-ghost btn-sm" type="button" data-action="cal-today">Today</button>' +
+          '<button class="btn btn-ghost btn-sm" type="button" data-action="cal-prev" aria-label="Previous month"><span aria-hidden="true">‹</span></button>' +
+          '<button class="btn btn-ghost btn-sm" type="button" data-action="cal-next" aria-label="Next month"><span aria-hidden="true">›</span></button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="cal-head" aria-hidden="true">' + CAL_DOW.map((d) => '<span>' + d + '</span>').join('') + '</div>' +
+      '<div class="cal-grid">' + cells + '</div>';
+  }
+
   // ============================================================
   // Dialogs
   // ============================================================
@@ -717,6 +824,15 @@
   });
   $('#dlg-confirm').addEventListener('close', () => {
     if (confirmResolve) { confirmResolve(false); confirmResolve = null; }
+  });
+
+  // ---- clear-all (typed confirmation) ----
+  $('#clear-confirm-input').addEventListener('input', () => {
+    $('#clear-accept').disabled = $('#clear-confirm-input').value.trim().toLowerCase() !== 'delete';
+  });
+  $('#clear-accept').addEventListener('click', () => {
+    $('#dlg-clear').close();
+    doClearAll();
   });
 
   // ---- semester ----
@@ -892,7 +1008,7 @@
     }).filter(Boolean);
   }
 
-  function openAssignmentDialog(id) {
+  function openAssignmentDialog(id, presetDate) {
     if (state.courses.length === 0) {
       announce('Add a course first — assignments need a home.');
       openCourseDialog();
@@ -909,7 +1025,7 @@
     ).join('');
     if (a) $('#assignment-course').value = a.courseId;
     $('#assignment-type').value = a ? a.type : 'assignment';
-    $('#assignment-due').value = a ? a.dueDate : '';
+    $('#assignment-due').value = a ? a.dueDate : (presetDate || '');
     $('#assignment-notes').value = a ? (a.notes || '') : '';
     $('#assignment-subtasks').innerHTML = a ? a.subtasks.map(subtaskFormRowHtml).join('') : '';
     setFieldError($('#assignment-title'), $('#assignment-title-error'), null);
@@ -1383,7 +1499,7 @@
       return;
     }
     if (hasAnyData() && !state.sample) {
-      const ok = await confirmAsk('Importing replaces everything currently here with the backup. Continue?', 'Replace & import');
+      const ok = await confirmAsk('Restoring replaces everything currently here with the backup. Continue?', 'Replace & restore');
       if (!ok) return;
     }
     state = cleaned;
@@ -1392,16 +1508,19 @@
     announce('Backup imported.');
   }
 
-  async function clearAll(skipConfirm) {
-    if (!skipConfirm) {
-      const ok = await confirmAsk('This deletes your semester, courses, and assignments from this browser. Export a backup first if you might want them back.', 'Delete everything');
-      if (!ok) return;
-    }
+  function doClearAll() {
     state = structuredClone(EMPTY);
     localStorage.removeItem(KEY);
     location.hash = '#week';
     render();
     announce('All data cleared.');
+  }
+  function clearAll(skipConfirm) {
+    if (skipConfirm) { doClearAll(); return; } // sample data — nothing worth guarding
+    const input = $('#clear-confirm-input');
+    input.value = '';
+    $('#clear-accept').disabled = true;
+    openDialog($('#dlg-clear'), input);
   }
 
   // ============================================================
@@ -1449,6 +1568,18 @@
         break;
       }
       case 'remove-subtask-row': btn.closest('.subtask-form-row').remove(); break;
+      case 'add-assignment-date': openAssignmentDialog(null, btn.dataset.date); break;
+      case 'cal-prev':
+      case 'cal-next':
+        calCursor = calShift(calCursor || todayISO().slice(0, 7), action === 'cal-prev' ? -1 : 1);
+        renderCalendar();
+        announce(calMonthLabel(calCursor));
+        break;
+      case 'cal-today':
+        calCursor = todayISO().slice(0, 7);
+        renderCalendar();
+        announce(calMonthLabel(calCursor));
+        break;
       case 'import-assignments': openImportDialog(); break;
       case 'parse-import-text': parseImportText(); break;
       case 'commit-import': commitImport(); break;
@@ -1570,6 +1701,18 @@
     t('week 2 on second Monday', weekOfSemester('2026-08-24', '2026-08-31') === 2);
     t('midweek start still week 1 that week', weekOfSemester('2026-08-26', '2026-08-24') === 1);
     t('16-week semester totals 16', weekOfSemester('2026-08-24', addDays('2026-08-24', 16 * 7 - 3)) === 16);
+
+    // --- month grid (Calendar view) ---
+    t('monthGrid July 2026 spans 5 Mon-first weeks', (() => {
+      const w = SHQ.monthGrid(2026, 6);
+      return w.length === 5 && w[0][0] === '2026-06-29' && w[4][6] === '2026-08-02';
+    })());
+    t('monthGrid Feb 2027 is exactly 4 weeks', SHQ.monthGrid(2027, 1).length === 4);
+    t('monthGrid Aug 2026 needs 6 weeks', SHQ.monthGrid(2026, 7).length === 6);
+    t('monthGrid Mar 2026 contiguous across DST', (() => {
+      const flat = [].concat.apply([], SHQ.monthGrid(2026, 2));
+      return flat.length % 7 === 0 && flat.every((d, i) => i === 0 || d === addDays(flat[i - 1], 1));
+    })());
     t('backup validation drops orphans', (() => {
       const v = validateBackup({ data: { semester: null, courses: [{ code: 'A', name: 'B', color: 'green', id: 'c1' }], assignments: [{ title: 'x', dueDate: '2026-09-01', courseId: 'nope' }] } });
       return v && v.assignments.length === 0 && v.courses.length === 1;

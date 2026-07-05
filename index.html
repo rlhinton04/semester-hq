@@ -27,7 +27,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="app.css?v=2">
+  <link rel="stylesheet" href="app.css?v=3">
 </head>
 
 <body>
@@ -47,6 +47,7 @@
         <a class="nav-link" href="#week" data-view="week">This Week</a>
         <a class="nav-link" href="#upcoming" data-view="upcoming">Upcoming</a>
         <a class="nav-link" href="#courses" data-view="courses">Courses</a>
+        <a class="nav-link" href="#calendar" data-view="calendar">Calendar</a>
       </nav>
 
       <button class="theme-toggle" type="button" id="theme-toggle" aria-label="Switch to dark mode">
@@ -106,6 +107,11 @@
       <div id="courses-content"></div>
     </section>
 
+    <section class="view" id="view-calendar" aria-labelledby="calendar-title" hidden>
+      <h1 class="visually-hidden" id="calendar-title">Calendar</h1>
+      <div id="calendar-content"></div>
+    </section>
+
     <section class="view view-about" id="view-about" aria-labelledby="about-title" hidden>
       <h1 id="about-title">How I built this</h1>
       <p class="about-lede">
@@ -135,7 +141,7 @@
       <h2>Honest limits</h2>
       <p>
         Your data lives in this browser's local storage and never leaves your device — which also means it doesn't
-        sync between devices. The Export button in the footer downloads a backup you can import anywhere.
+        sync between devices. The Download backup button in the footer saves a file you can restore anywhere.
       </p>
 
       <p class="about-signoff">
@@ -147,11 +153,11 @@
 
   <footer class="app-footer">
     <div class="shell footer-row">
-      <p class="footer-note">Your data stays in this browser — nothing is uploaded.</p>
+      <p class="footer-note">Your data stays in this browser — download a backup file to move or restore it anywhere.</p>
       <div class="footer-actions">
-        <button class="btn btn-ghost btn-sm" type="button" id="btn-export">Export backup</button>
-        <button class="btn btn-ghost btn-sm" type="button" id="btn-import">Import</button>
-        <button class="btn btn-ghost btn-sm" type="button" id="btn-clear">Clear all data</button>
+        <button class="btn btn-ghost btn-sm" type="button" id="btn-export" title="Saves your semester, courses, and assignments to a JSON file">Download backup</button>
+        <button class="btn btn-ghost btn-sm" type="button" id="btn-import" title="Loads a backup file, replacing what's here">Restore backup</button>
+        <button class="btn btn-danger-quiet btn-sm" type="button" id="btn-clear">Clear all data</button>
         <input type="file" id="file-import" accept="application/json,.json" hidden>
       </div>
       <p class="footer-credit">
@@ -300,6 +306,21 @@
     </div>
   </dialog>
 
+  <!-- Clear-all dialog -->
+  <dialog class="dialog dialog-sm" id="dlg-clear" aria-labelledby="dlg-clear-title">
+    <h2 id="dlg-clear-title">Delete everything?</h2>
+    <p>This permanently deletes your semester, courses, and assignments from this browser. There is no undo.</p>
+    <p><button class="btn btn-ghost btn-sm" type="button" data-action="export-backup">Download a backup first</button></p>
+    <div class="field">
+      <label for="clear-confirm-input">Type <strong>delete</strong> to confirm</label>
+      <input type="text" id="clear-confirm-input" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="dialog-actions">
+      <button class="btn btn-ghost" type="button" data-action="close-dialog">Cancel</button>
+      <button class="btn btn-danger" type="button" id="clear-accept" disabled>Delete everything</button>
+    </div>
+  </dialog>
+
   <!-- Confirm dialog -->
   <dialog class="dialog dialog-sm" id="dlg-confirm" aria-labelledby="dlg-confirm-title">
     <h2 id="dlg-confirm-title">Are you sure?</h2>
@@ -312,7 +333,7 @@
 
   <div class="visually-hidden" role="status" aria-live="polite" id="live"></div>
 
-  <script src="parsers.js?v=1"></script>
-  <script src="app.js?v=2"></script>
+  <script src="parsers.js?v=2"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>

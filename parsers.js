@@ -17,6 +17,28 @@
   }
 
   // ============================================================
+  // Month grid (Calendar view)
+  // ============================================================
+  // Mon-first weeks covering the given month (month0 = 0-based).
+  // Each week is 7 local-ISO "YYYY-MM-DD" strings; 4–6 rows depending
+  // on where the month falls. Local Date construction keeps DST out.
+  function monthGrid(year, month0) {
+    const first = new Date(year, month0, 1);
+    const lead = (first.getDay() + 6) % 7; // days since Monday
+    let cursor = new Date(year, month0, 1 - lead);
+    const weeks = [];
+    do {
+      const week = [];
+      for (let i = 0; i < 7; i++) {
+        week.push(cursor.getFullYear() + '-' + pad2(cursor.getMonth() + 1) + '-' + pad2(cursor.getDate()));
+        cursor = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() + 1);
+      }
+      weeks.push(week);
+    } while (cursor.getMonth() === month0 && cursor.getFullYear() === year);
+    return weeks;
+  }
+
+  // ============================================================
   // Class-schedule helpers
   // ============================================================
   const DAY_ABBR = ['Su', 'M', 'Tu', 'W', 'Th', 'F', 'Sa']; // Date.getDay() order
@@ -284,6 +306,7 @@
   }
 
   window.SHQ = {
+    monthGrid,
     formatMeetingDays, formatTime12, formatMeetingTime, meetingsToday,
     inferType, inferYear, findDateToken, parseSyllabusText,
     parseICS, icsDate,
