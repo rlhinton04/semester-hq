@@ -1120,6 +1120,12 @@ main.shell { flex: 1; padding: 2rem 0 3.5rem; }
 .about-signoff { margin-top: 2rem; color: var(--muted); }
 
 /* ============================================================
+   Sync dialog
+   ============================================================ */
+.sync-status { font-weight: 600; }
+.sync-help { font-size: 0.85rem; color: var(--muted); }
+
+/* ============================================================
    Calendar view
    ============================================================ */
 .cal-toolbar { margin-bottom: 0.75rem; }

@@ -11,6 +11,14 @@
   <meta property="og:url" content="https://rlhinton04.github.io/semester-hq/">
   <meta property="og:image" content="https://rlhinton04.github.io/semester-hq/og.png">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2317604a'/%3E%3Cpath d='M18 34l10 10 18-24' stroke='%23faf9f6' stroke-width='7' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <meta name="theme-color" content="#f4f1ea" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#12171a" media="(prefers-color-scheme: dark)">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Semester HQ">
 
   <!-- Apply saved/OS theme before paint to avoid a flash -->
   <script>
@@ -27,7 +35,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="app.css?v=3">
+  <link rel="stylesheet" href="app.css?v=4">
 </head>
 
 <body>
@@ -140,8 +148,10 @@
 
       <h2>Honest limits</h2>
       <p>
-        Your data lives in this browser's local storage and never leaves your device — which also means it doesn't
-        sync between devices. The Download backup button in the footer saves a file you can restore anywhere.
+        Your data lives in this browser's local storage — no account, no server of mine. You can install the app on
+        your phone straight from the browser (Share → Add to Home Screen on iPhone, Install on Android) and it works
+        offline. To keep devices in sync, the optional Sync button connects to a private gist on your own GitHub
+        account; otherwise the Download backup button saves a file you can restore anywhere.
       </p>
 
       <p class="about-signoff">
@@ -157,6 +167,7 @@
       <div class="footer-actions">
         <button class="btn btn-ghost btn-sm" type="button" id="btn-export" title="Saves your semester, courses, and assignments to a JSON file">Download backup</button>
         <button class="btn btn-ghost btn-sm" type="button" id="btn-import" title="Loads a backup file, replacing what's here">Restore backup</button>
+        <button class="btn btn-ghost btn-sm" type="button" id="btn-sync" title="Keep devices in sync through a private gist on your GitHub account">Sync</button>
         <button class="btn btn-danger-quiet btn-sm" type="button" id="btn-clear">Clear all data</button>
         <input type="file" id="file-import" accept="application/json,.json" hidden>
       </div>
@@ -306,6 +317,41 @@
     </div>
   </dialog>
 
+  <!-- Sync dialog -->
+  <dialog class="dialog" id="dlg-sync" aria-labelledby="dlg-sync-title">
+    <h2 id="dlg-sync-title">Sync between devices</h2>
+    <p id="sync-status" class="sync-status"></p>
+    <div id="sync-setup">
+      <p>Semester HQ can keep your devices in sync through a <strong>private gist</strong> on your own GitHub
+      account — no other service involved. The token is stored only on this device and sent only to GitHub.</p>
+      <p class="sync-help">Create a fine-grained personal access token at
+      <strong>github.com → Settings → Developer settings → Fine-grained tokens</strong> with just the
+      <strong>Gists: read and write</strong> account permission, then paste it here on each device.</p>
+      <div class="field">
+        <label for="sync-token">GitHub token</label>
+        <input type="password" id="sync-token" autocomplete="off" spellcheck="false" placeholder="github_pat_…">
+        <p class="field-error" id="sync-token-error" hidden></p>
+      </div>
+    </div>
+    <div class="dialog-actions">
+      <button class="btn btn-ghost" type="button" data-action="close-dialog">Close</button>
+      <button class="btn btn-ghost" type="button" id="sync-disconnect" data-action="sync-disconnect" hidden>Disconnect</button>
+      <button class="btn btn-primary" type="button" id="sync-connect" data-action="sync-connect">Connect &amp; sync</button>
+      <button class="btn btn-primary" type="button" id="sync-now" data-action="sync-now" hidden>Sync now</button>
+    </div>
+  </dialog>
+
+  <!-- Sync conflict dialog -->
+  <dialog class="dialog dialog-sm" id="dlg-sync-conflict" aria-labelledby="dlg-sync-conflict-title">
+    <h2 id="dlg-sync-conflict-title">Both devices changed</h2>
+    <p>This device and another one both made changes since the last sync. Which version should win?
+    The other is replaced everywhere.</p>
+    <div class="dialog-actions">
+      <button class="btn btn-ghost" type="button" data-action="sync-keep-remote">Use other device’s</button>
+      <button class="btn btn-primary" type="button" data-action="sync-keep-local">Keep this device’s</button>
+    </div>
+  </dialog>
+
   <!-- Clear-all dialog -->
   <dialog class="dialog dialog-sm" id="dlg-clear" aria-labelledby="dlg-clear-title">
     <h2 id="dlg-clear-title">Delete everything?</h2>
@@ -333,7 +379,7 @@
 
   <div class="visually-hidden" role="status" aria-live="polite" id="live"></div>
 
-  <script src="parsers.js?v=2"></script>
-  <script src="app.js?v=3"></script>
+  <script src="parsers.js?v=3"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>

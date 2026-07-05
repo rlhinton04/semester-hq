@@ -36,3 +36,6 @@ every line is `PASS — …` or `FAIL — …`. Capture console messages with Pl
 - Dates are local `YYYY-MM-DD` strings everywhere; never compare against UTC-parsed dates.
 - `render()` re-renders all views; per-view checks should re-query the DOM after any action.
 - Cache-busted assets (`?v=N` in index.html) — bump when editing js/css or a warm browser may serve stale files.
+- **PWA lockstep rule**: whenever a `?v=` bumps in index.html, also bump `CACHE` in `sw.js` and update its `SHELL` URLs, or installed apps keep precaching stale assets.
+- Service worker caching can mask changes during verification — test in a fresh Playwright context, or unregister the SW / bump `CACHE` first.
+- Gist sync talks to `https://api.github.com`; mock it with `page.route('https://api.github.com/**')` backed by an in-memory gist store to test connect/push/pull/conflict without a real token. Sync settings live in localStorage key `semesterhq:sync`.

@@ -73,7 +73,7 @@
   const THEME_KEY = 'semesterhq:theme';
   const EMPTY = {
     semester: null, courses: [], assignments: [], sample: false,
-    meta: { lastBackupAt: null, changesSinceBackup: 0, nudgeSnoozedUntil: null }
+    meta: { lastBackupAt: null, changesSinceBackup: 0, nudgeSnoozedUntil: null, updatedAt: null }
   };
 
   const ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -94,7 +94,8 @@
         lastBackupAt: typeof meta.lastBackupAt === 'string' ? meta.lastBackupAt : null,
         changesSinceBackup: Number.isInteger(meta.changesSinceBackup) && meta.changesSinceBackup >= 0
           ? meta.changesSinceBackup : 0,
-        nudgeSnoozedUntil: ISO_RE.test(meta.nudgeSnoozedUntil || '') ? meta.nudgeSnoozedUntil : null
+        nudgeSnoozedUntil: ISO_RE.test(meta.nudgeSnoozedUntil || '') ? meta.nudgeSnoozedUntil : null,
+        updatedAt: typeof meta.updatedAt === 'string' ? meta.updatedAt : null
       }
     };
     out.courses.forEach((c) => {
@@ -139,11 +140,30 @@
     }
   }
   function save(opts) {
-    if (!opts || !opts.silent) state.meta.changesSinceBackup += 1;
+    if (!opts || !opts.silent) {
+      state.meta.changesSinceBackup += 1;
+      state.meta.updatedAt = new Date().toISOString();
+      scheduleSyncPush();
+    }
     localStorage.setItem(KEY, JSON.stringify(state));
   }
 
   let state = load();
+
+  // Gist-sync settings live in their own key so tokens never ride along
+  // in backups or in the synced payload itself.
+  const SYNC_KEY = 'semesterhq:sync';
+  function loadSyncSettings() {
+    try {
+      const s = JSON.parse(localStorage.getItem(SYNC_KEY));
+      return s && typeof s === 'object' && typeof s.token === 'string' ? s : null;
+    } catch (e) { return null; }
+  }
+  function saveSyncSettings(s) {
+    if (s) localStorage.setItem(SYNC_KEY, JSON.stringify(s));
+    else localStorage.removeItem(SYNC_KEY);
+  }
+  let syncCfg = loadSyncSettings();
 
   const COLORS = [
     { key: 'green', label: 'Green' },
@@ -1508,9 +1528,206 @@
     announce('Backup imported.');
   }
 
+  // ============================================================
+  // Gist sync — the state lives in a private gist on the user's own
+  // GitHub account; whole-state last-write-wins with a conflict prompt.
+  // ============================================================
+  const GIST_FILE = 'semester-hq-sync.json';
+  const GIST_DESC = 'Semester HQ sync';
+  let syncTimer = null;
+  let syncBusy = false;
+  let pendingRemote = null; // payload held while the conflict dialog is open
+
+  function ghFetch(path, opts) {
+    return fetch('https://api.github.com' + path, Object.assign({}, opts, {
+      headers: Object.assign({
+        'Authorization': 'Bearer ' + syncCfg.token,
+        'Accept': 'application/vnd.github+json'
+      }, (opts && opts.headers) || {})
+    })).then((res) => {
+      if (res.status === 401 || res.status === 403) throw new Error('sync-auth');
+      if (!res.ok) throw new Error('sync-http-' + res.status);
+      return res;
+    });
+  }
+
+  function buildSyncPayload() {
+    return JSON.stringify({
+      app: 'semester-hq',
+      version: 2,
+      updatedAt: state.meta.updatedAt,
+      exportedAt: new Date().toISOString(),
+      data: { semester: state.semester, courses: state.courses, assignments: state.assignments }
+    }, null, 2);
+  }
+
+  function recordSyncStamps(localAt, remoteAt) {
+    syncCfg.lastLocalUpdatedAt = localAt || null;
+    syncCfg.lastRemoteUpdatedAt = remoteAt || null;
+    syncCfg.lastSyncAt = new Date().toISOString();
+    saveSyncSettings(syncCfg);
+  }
+
+  function scheduleSyncPush() {
+    if (!syncCfg || !syncCfg.gistId || state.sample) return;
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => { syncNow(); }, 3000);
+  }
+
+  async function syncPush() {
+    const content = buildSyncPayload();
+    await ghFetch('/gists/' + syncCfg.gistId, {
+      method: 'PATCH',
+      body: JSON.stringify({ files: { [GIST_FILE]: { content: content } } })
+    });
+    recordSyncStamps(state.meta.updatedAt, state.meta.updatedAt);
+    announce('Synced.');
+  }
+
+  function applyRemote(remote) {
+    const cleaned = validateBackup(remote);
+    if (!cleaned) { announce('Sync: the remote data doesn’t look like Semester HQ data — not applied.'); return; }
+    state = cleaned;
+    state.meta.updatedAt = typeof remote.updatedAt === 'string' ? remote.updatedAt : null;
+    save({ silent: true });
+    recordSyncStamps(state.meta.updatedAt, state.meta.updatedAt);
+    render();
+    announce('Synced from your other device.');
+  }
+
+  function sameData(remote) {
+    const local = { semester: state.semester, courses: state.courses, assignments: state.assignments };
+    return JSON.stringify(local) === JSON.stringify(remote && remote.data);
+  }
+
+  async function syncNow() {
+    if (!syncCfg || !syncCfg.gistId || state.sample || syncBusy) return;
+    syncBusy = true;
+    try {
+      const gist = await ghFetch('/gists/' + syncCfg.gistId).then((r) => r.json());
+      const file = gist.files && gist.files[GIST_FILE];
+      let remote = null;
+      if (file) {
+        let content = file.content;
+        if (file.truncated) content = await fetch(file.raw_url).then((r) => r.text());
+        try { remote = JSON.parse(content); } catch (e) { remote = null; }
+      }
+      // Data that predates sync has no stamp yet — give it one so it can win.
+      if (hasAnyData() && !state.meta.updatedAt) {
+        state.meta.updatedAt = new Date().toISOString();
+        save({ silent: true });
+      }
+      const plan = SHQ.planSync({
+        localUpdatedAt: hasAnyData() ? state.meta.updatedAt : null,
+        remoteUpdatedAt: remote && typeof remote.updatedAt === 'string' ? remote.updatedAt : null,
+        lastLocalUpdatedAt: syncCfg.lastLocalUpdatedAt,
+        lastRemoteUpdatedAt: syncCfg.lastRemoteUpdatedAt
+      });
+      if (plan === 'push') {
+        await syncPush();
+      } else if (plan === 'pull') {
+        applyRemote(remote);
+      } else if (plan === 'conflict') {
+        if (sameData(remote)) {
+          recordSyncStamps(state.meta.updatedAt, remote.updatedAt);
+        } else {
+          pendingRemote = remote;
+          openDialog($('#dlg-sync-conflict'), $('[data-action="sync-keep-local"]'));
+        }
+      } else {
+        recordSyncStamps(syncCfg.lastLocalUpdatedAt, syncCfg.lastRemoteUpdatedAt);
+      }
+      renderSyncDialog();
+    } catch (e) {
+      if (e && e.message === 'sync-auth') {
+        announce('Sync failed: GitHub rejected the token — it may have expired.');
+        renderSyncDialog('GitHub rejected the token — it may have expired or lack the Gists permission.');
+      }
+      // Network errors stay quiet; sync retries on the next open/change/reconnect.
+    } finally {
+      syncBusy = false;
+    }
+  }
+
+  async function syncConnect() {
+    const input = $('#sync-token');
+    const token = input.value.trim();
+    setFieldError(input, $('#sync-token-error'), token ? null : 'Paste a GitHub token to connect.');
+    if (!token) return;
+    const btn = $('#sync-connect');
+    btn.disabled = true;
+    btn.textContent = 'Connecting…';
+    syncCfg = { token: token, gistId: null, lastLocalUpdatedAt: null, lastRemoteUpdatedAt: null, lastSyncAt: null };
+    try {
+      const gists = await ghFetch('/gists?per_page=100').then((r) => r.json());
+      const existing = gists.find((g) => g.files && g.files[GIST_FILE]);
+      if (existing) {
+        syncCfg.gistId = existing.id;
+      } else {
+        const created = await ghFetch('/gists', {
+          method: 'POST',
+          body: JSON.stringify({ description: GIST_DESC, public: false, files: { [GIST_FILE]: { content: buildSyncPayload() } } })
+        }).then((r) => r.json());
+        syncCfg.gistId = created.id;
+        recordSyncStamps(state.meta.updatedAt, state.meta.updatedAt);
+      }
+      saveSyncSettings(syncCfg);
+      input.value = '';
+      await syncNow();
+      renderSyncDialog();
+      announce('Sync connected.');
+    } catch (e) {
+      syncCfg = null;
+      saveSyncSettings(null);
+      setFieldError(input, $('#sync-token-error'),
+        e && e.message === 'sync-auth'
+          ? 'GitHub rejected that token. Check it has the Gists read/write permission.'
+          : 'Couldn’t reach GitHub — check your connection and try again.');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Connect & sync';
+    }
+  }
+
+  function syncDisconnect() {
+    syncCfg = null;
+    saveSyncSettings(null);
+    renderSyncDialog();
+    announce('Sync disconnected. Your data stays on this device; the gist stays on GitHub.');
+  }
+
+  function renderSyncDialog(errorMsg) {
+    const connected = !!(syncCfg && syncCfg.gistId);
+    $('#sync-setup').hidden = connected;
+    $('#sync-connect').hidden = connected;
+    $('#sync-now').hidden = !connected;
+    $('#sync-disconnect').hidden = !connected;
+    let status;
+    if (errorMsg) status = errorMsg;
+    else if (!connected) status = 'Not connected. Changes stay on this device.';
+    else {
+      status = 'Connected to a private gist on your GitHub account.';
+      if (state.sample) status += ' Sample data is never synced — clear it to start.';
+      else if (syncCfg.lastSyncAt) status += ' Last synced ' + new Date(syncCfg.lastSyncAt).toLocaleString() + '.';
+    }
+    $('#sync-status').textContent = status;
+  }
+
+  function openSyncDialog() {
+    renderSyncDialog();
+    openDialog($('#dlg-sync'), (syncCfg && syncCfg.gistId) ? $('#sync-now') : $('#sync-token'));
+  }
+
   function doClearAll() {
     state = structuredClone(EMPTY);
     localStorage.removeItem(KEY);
+    // With sync connected, an intentional wipe is a change like any other —
+    // otherwise the next sync would just pull everything back.
+    if (syncCfg && syncCfg.gistId) {
+      state.meta.updatedAt = new Date().toISOString();
+      localStorage.setItem(KEY, JSON.stringify(state));
+      scheduleSyncPush();
+    }
     location.hash = '#week';
     render();
     announce('All data cleared.');
@@ -1529,6 +1746,8 @@
   function applyThemeLabel() {
     const dark = document.documentElement.getAttribute('data-theme') === 'dark';
     $('#theme-toggle').setAttribute('aria-label', dark ? 'Switch to light mode' : 'Switch to dark mode');
+    // Keep the installed-app status bar in step with the in-app toggle.
+    $$('meta[name="theme-color"]').forEach((m) => { m.content = dark ? '#12171a' : '#f4f1ea'; });
   }
   $('#theme-toggle').addEventListener('click', () => {
     const dark = document.documentElement.getAttribute('data-theme') === 'dark';
@@ -1557,6 +1776,21 @@
       case 'load-sample': loadSample(); break;
       case 'clear-sample': clearAll(true); break;
       case 'export-backup': exportData(); break;
+      case 'sync-connect': syncConnect(); break;
+      case 'sync-now': syncNow(); break;
+      case 'sync-disconnect': syncDisconnect(); break;
+      case 'sync-keep-local':
+        btn.closest('dialog').close();
+        pendingRemote = null;
+        syncPush().catch(() => announce('Sync will retry when you’re back online.'));
+        break;
+      case 'sync-keep-remote': {
+        btn.closest('dialog').close();
+        const remote = pendingRemote;
+        pendingRemote = null;
+        if (remote) applyRemote(remote);
+        break;
+      }
       case 'add-meeting':
         $('#course-meetings').insertAdjacentHTML('beforeend', meetingRowHtml(null));
         $('.meeting-row:last-child .meeting-day', $('#course-meetings')).focus();
@@ -1680,6 +1914,7 @@
 
   $('#btn-export').addEventListener('click', exportData);
   $('#btn-import').addEventListener('click', () => $('#file-import').click());
+  $('#btn-sync').addEventListener('click', openSyncDialog);
   $('#btn-clear').addEventListener('click', () => clearAll(false));
 
   window.addEventListener('hashchange', showView);
@@ -1851,6 +2086,16 @@
       return res.plan.length === 1 && res.plan[0].action === 'create';
     })());
 
+    // --- gist-sync planning ---
+    t('planSync: nothing anywhere → none', SHQ.planSync({ localUpdatedAt: null, remoteUpdatedAt: null, lastLocalUpdatedAt: null, lastRemoteUpdatedAt: null }) === 'none');
+    t('planSync: first connect, only local data → push', SHQ.planSync({ localUpdatedAt: '2026-07-05T10:00:00Z', remoteUpdatedAt: null, lastLocalUpdatedAt: null, lastRemoteUpdatedAt: null }) === 'push');
+    t('planSync: first connect, only remote data → pull', SHQ.planSync({ localUpdatedAt: null, remoteUpdatedAt: '2026-07-05T10:00:00Z', lastLocalUpdatedAt: null, lastRemoteUpdatedAt: null }) === 'pull');
+    t('planSync: first connect, both have data → conflict', SHQ.planSync({ localUpdatedAt: '2026-07-05T10:00:00Z', remoteUpdatedAt: '2026-07-05T09:00:00Z', lastLocalUpdatedAt: null, lastRemoteUpdatedAt: null }) === 'conflict');
+    t('planSync: local edited since last sync → push', SHQ.planSync({ localUpdatedAt: '2026-07-05T11:00:00Z', remoteUpdatedAt: '2026-07-05T10:00:00Z', lastLocalUpdatedAt: '2026-07-05T10:00:00Z', lastRemoteUpdatedAt: '2026-07-05T10:00:00Z' }) === 'push');
+    t('planSync: remote edited since last sync → pull', SHQ.planSync({ localUpdatedAt: '2026-07-05T10:00:00Z', remoteUpdatedAt: '2026-07-05T11:00:00Z', lastLocalUpdatedAt: '2026-07-05T10:00:00Z', lastRemoteUpdatedAt: '2026-07-05T10:00:00Z' }) === 'pull');
+    t('planSync: both edited → conflict', SHQ.planSync({ localUpdatedAt: '2026-07-05T11:00:00Z', remoteUpdatedAt: '2026-07-05T11:30:00Z', lastLocalUpdatedAt: '2026-07-05T10:00:00Z', lastRemoteUpdatedAt: '2026-07-05T10:00:00Z' }) === 'conflict');
+    t('planSync: in step → none', SHQ.planSync({ localUpdatedAt: '2026-07-05T10:00:00Z', remoteUpdatedAt: '2026-07-05T10:00:00Z', lastLocalUpdatedAt: '2026-07-05T10:00:00Z', lastRemoteUpdatedAt: '2026-07-05T10:00:00Z' }) === 'none');
+
     // --- due-entry collection ---
     t('dueEntries hides steps of done parents', (() => {
       const es = dueEntries([
@@ -1869,5 +2114,10 @@
   // ============================================================
   applyThemeLabel();
   showView();
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+  if (syncCfg && syncCfg.gistId) syncNow();
+  window.addEventListener('online', () => syncNow());
   if (location.search.indexOf('selftest') !== -1) runSelfTests();
 })();

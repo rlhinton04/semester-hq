@@ -305,8 +305,29 @@
     return { plan, unchanged };
   }
 
+  // ============================================================
+  // Gist-sync planning
+  // ============================================================
+  // Decide what a sync pass should do by comparing the current change
+  // stamps against the stamps recorded at the last successful sync.
+  // All values are ISO datetime strings or null (null = no data yet).
+  // Whole-state last-write-wins by design — no field merging.
+  function planSync(s) {
+    const local = s.localUpdatedAt || null;
+    const remote = s.remoteUpdatedAt || null;
+    if (local === null && remote === null) return 'none';
+    if (remote === null) return 'push';
+    if (local === null) return 'pull';
+    const localChanged = local !== (s.lastLocalUpdatedAt || null);
+    const remoteChanged = remote !== (s.lastRemoteUpdatedAt || null);
+    if (localChanged && remoteChanged) return 'conflict';
+    if (localChanged) return 'push';
+    if (remoteChanged) return 'pull';
+    return 'none';
+  }
+
   window.SHQ = {
-    monthGrid,
+    monthGrid, planSync,
     formatMeetingDays, formatTime12, formatMeetingTime, meetingsToday,
     inferType, inferYear, findDateToken, parseSyllabusText,
     parseICS, icsDate,
