@@ -3,11 +3,11 @@
    or installed apps keep precaching the old assets. */
 'use strict';
 
-const CACHE = 'shq-v1';
+const CACHE = 'shq-v2';
 const FONT_CACHE = 'shq-fonts';
 const SHELL = [
   './',
-  './app.css?v=4',
+  './app.css?v=5',
   './app.js?v=4',
   './parsers.js?v=3',
   './manifest.webmanifest',
