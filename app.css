@@ -96,6 +96,9 @@ html { scroll-behavior: smooth; }
 
 body {
   margin: 0;
+  /* Landscape on notched iPhones: keep content clear of the sensor housing */
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-body);
@@ -163,6 +166,8 @@ main.shell { flex: 1; padding: 2rem 0 3.5rem; }
   background: color-mix(in srgb, var(--bg) 88%, transparent);
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--border-soft);
+  /* Installed on iOS (viewport-fit=cover): keep content out of the notch/status bar */
+  padding-top: env(safe-area-inset-top, 0px);
 }
 
 .header-row {
@@ -1220,6 +1225,8 @@ main.shell { flex: 1; padding: 2rem 0 3.5rem; }
 .app-footer {
   border-top: 1px solid var(--border-soft);
   padding: 1.1rem 0;
+  /* Installed on iOS: keep the last row above the home indicator */
+  padding-bottom: calc(1.1rem + env(safe-area-inset-bottom, 0px));
   font-size: 0.82rem;
   color: var(--muted);
 }
